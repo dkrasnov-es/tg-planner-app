@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Планировщик</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <div id="app"></div>
+  <script>
+    // Тонкий загрузчик: тянет свежую версию приложения, обходя кэш.
+    // Вся логика/стили — в app.js; правки видны сразу после git push.
+    (function () {
+      var s = document.createElement("script");
+      s.src = "app.js?t=" + Date.now();
+      s.onerror = function () {
+        document.getElementById("app").textContent =
+          "Не удалось загрузить приложение. Проверьте интернет и попробуйте снова.";
+      };
+      document.body.appendChild(s);
+    })();
+  </script>
+</body>
+</html>
