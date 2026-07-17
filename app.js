@@ -457,44 +457,73 @@ mb.onClick(async () => {
   tg.sendData(payload);   // закроет приложение; бот применит и пришлёт свежий синк
 });
 
-// ── Синк-режим (данные от бота в location.hash) ─────────────────────────────
-// #sync=<b64url gzip json>  или фрагменты  #syncf=<t>:<i>:<n>:<кусок>
-async function handleSync() {
+// ── Синк-режим (данные от бота в URL) ───────────────────────────────────────
+// ?sync=<b64url gzip json>  или фрагменты  ?syncf=<t>:<i>:<n>:<кусок>
+// (query-параметры, не hash — проверенный в Telegram путь; hash поддержан для совместимости)
+function syncParams() {
+  const qs = new URLSearchParams(window.location.search);
+  if (qs.get("sync")) return { whole: qs.get("sync") };
+  if (qs.get("syncf")) {
+    const m = qs.get("syncf").match(/^([^:]+):(\d+):(\d+):(.+)$/);
+    if (m) return { t: m[1], i: Number(m[2]), n: Number(m[3]), chunk: m[4] };
+  }
   const h = window.location.hash || "";
   const m1 = h.match(/#sync=(.+)/);
+  if (m1) return { whole: m1[1] };
   const m2 = h.match(/#syncf=([^:]+):(\d+):(\d+):(.+)/);
-  if (!m1 && !m2) return false;
-  let ok = false;
+  if (m2) return { t: m2[1], i: Number(m2[2]), n: Number(m2[3]), chunk: m2[4] };
+  return null;
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function handleSync() {
+  const sp = syncParams();
+  if (!sp) return false;
   try {
-    if (m1) {
-      snap = JSON.parse(await gunzipB64(m1[1]));
-      ok = await csSetBig("snap", snap);
-    } else {
-      const [, t, iStr, nStr, chunk] = m2;
-      const n = Number(nStr);
-      await csSet("sf" + t + "_" + iStr, chunk);
-      const parts = [];
-      let complete = true;
-      for (let k = 0; k < n; k++) {
-        const p = await csGet("sf" + t + "_" + k);
-        if (!p) { complete = false; break; }
-        parts.push(p);
-      }
-      if (!complete) {
-        renderCenter("Часть получена", `Кусок ${Number(iStr) + 1} из ${n}. Нажмите следующую кнопку синхронизации в чате.`);
+    if (sp.whole) {
+      snap = JSON.parse(await gunzipB64(sp.whole));
+      if (!(await csSetBig("snap", snap))) {
+        renderCenter("Не удалось сохранить", "CloudStorage отклонил запись снимка. Запросите новую кнопку: /app");
         return true;
       }
-      snap = JSON.parse(await gunzipB64(parts.join("")));
-      ok = await csSetBig("snap", snap);
-      for (let k = 0; k < n; k++) await csRemove("sf" + t + "_" + k);
+      renderCenter("Данные обновлены ✓",
+        "Снимок задач синхронизирован. Откройте планировщик кнопкой «📱 Планировщик» на клавиатуре бота.", true);
+      return true;
     }
-  } catch (e) { ok = false; }
-  if (ok) {
+    const { t, i, n, chunk } = sp;
+    const wrote = await csSet("sf" + t + "_" + i, chunk);
+    if (!wrote) {
+      renderCenter("Не удалось сохранить кусок", `CloudStorage отклонил запись (кусок ${i + 1}/${n}). Запросите новую кнопку: /app`);
+      return true;
+    }
+    // CloudStorage серверный — записи из других webview могут доезжать с лагом; ретраим чтение
+    let parts = null, missing = [];
+    for (let attempt = 0; attempt < 4; attempt++) {
+      parts = []; missing = [];
+      for (let k = 0; k < n; k++) {
+        const p = await csGet("sf" + t + "_" + k);
+        if (p) parts.push(p); else missing.push(k + 1);
+      }
+      if (!missing.length) break;
+      await sleep(600);
+    }
+    if (missing.length) {
+      renderCenter(`Кусок ${i + 1} из ${n} получен`,
+        `Ещё не получены: ${missing.join(", ")}. Нажмите оставшиеся кнопки синхронизации в чате (порядок не важен).`);
+      return true;
+    }
+    snap = JSON.parse(await gunzipB64(parts.join("")));
+    if (!(await csSetBig("snap", snap))) {
+      renderCenter("Не удалось сохранить", "Куски собраны, но CloudStorage отклонил запись снимка. Запросите новую кнопку: /app");
+      return true;
+    }
+    for (let k = 0; k < n; k++) await csRemove("sf" + t + "_" + k);
     renderCenter("Данные обновлены ✓",
-      "Снимок задач синхронизирован. Откройте планировщик кнопкой «📱 Планировщик» на клавиатуре бота.",
-      true);
-  } else {
-    renderCenter("Не удалось синхронизировать", "Попробуйте ещё раз — запросите новую кнопку у бота командой /app.");
+      "Снимок задач синхронизирован. Откройте планировщик кнопкой «📱 Планировщик» на клавиатуре бота.", true);
+  } catch (e) {
+    renderCenter("Не удалось синхронизировать",
+      `Ошибка: ${esc(String(e && e.message || e)).slice(0, 120)}. Запросите новую кнопку у бота: /app`);
   }
   return true;
 }

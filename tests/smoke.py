@@ -82,14 +82,14 @@ def run():
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
 
-        # ── синк двумя фрагментами ──
-        page.goto(f"{url}#syncf=100:0:2:{chunks[0]}")
-        page.wait_for_selector(".center-box", timeout=5000)
-        assert "Часть получена" in page.inner_text(".center-box")
+        # ── синк двумя фрагментами, нарочно в обратном порядке ──
+        page.goto(f"{url}?syncf=100:1:2:{chunks[1]}")
+        page.wait_for_selector(".center-box", timeout=10000)
+        box = page.inner_text(".center-box")
+        assert "Кусок 2 из 2 получен" in box and "не получены: 1" in box, box
 
-        page.goto("about:blank")   # hash-only navigation не перезагружает страницу
-        page.goto(f"{url}#syncf=100:1:2:{chunks[1]}")
-        page.wait_for_selector("#c-open", timeout=5000)
+        page.goto(f"{url}?syncf=100:0:2:{chunks[0]}")
+        page.wait_for_selector("#c-open", timeout=10000)
         assert "Данные обновлены" in page.inner_text(".center-box")
         page.click("#c-open")
         page.wait_for_timeout(300)
