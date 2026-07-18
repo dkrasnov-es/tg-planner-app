@@ -74,10 +74,13 @@ const STYLE = `
   .empty { text-align: center; color: var(--hint); padding: 40px 30px; font-size: 15px; }
   .form-label { font-size: 12.5px; font-weight: 700; color: var(--hint); margin: 14px 16px 6px;
     text-transform: uppercase; letter-spacing: .05em; }
-  input[type=text], select { width: calc(100% - 24px); margin: 0 12px; padding: 12px 14px;
+  input[type=text], input[type=date], select { width: calc(100% - 24px); margin: 0 12px; padding: 12px 14px;
     font-size: 16px; font-family: inherit; border: 1.5px solid transparent; border-radius: 12px;
     background: var(--card); color: var(--text); outline: none; }
-  input[type=text]:focus { border-color: var(--btn); }
+  input[type=text]:focus, input[type=date]:focus { border-color: var(--btn); }
+  input[type=date] { -webkit-appearance: none; appearance: none; }
+  .date-custom { margin: 7px 12px 0; }
+  .date-custom.on input[type=date] { border-color: var(--btn); }
   .date-row { display: flex; gap: 7px; margin: 8px 12px 0; }
   .date-opt { flex: 1; border: none; border-radius: 10px; background: var(--card); color: var(--text);
     font-size: 13px; font-weight: 600; padding: 10px 2px; cursor: pointer; }
@@ -396,33 +399,57 @@ function toggleDone(id) {
   render();
 }
 
+// ── Секция выбора срока (пресеты + произвольная дата) ─────────────────────────
+function datePresets() {
+  return [["Сегодня", snap.today], ["Завтра", isoAddDays(snap.today, 1)],
+    ["+7 дней", isoAddDays(snap.today, 7)], ["Без даты", ""]];
+}
+function dateSectionHtml(sel) {
+  const presets = datePresets();
+  const isPreset = presets.some(([, v]) => (v || null) === sel);
+  return `<div class="date-row">
+      ${presets.map(([lbl, v]) =>
+        `<button class="date-opt${(v || null) === sel && isPreset ? " on" : ""}" data-due="${v}">${lbl}</button>`).join("")}
+    </div>
+    <div class="date-custom${sel && !isPreset ? " on" : ""}">
+      <input type="date" id="date-custom" value="${sel && !isPreset ? sel : ""}" placeholder="Другая дата">
+    </div>`;
+}
+// setDue(iso|null) вызывается при выборе пресета или произвольной даты
+function wireDateSection(setDue) {
+  const custom = app.querySelector("#date-custom");
+  const box = app.querySelector(".date-custom");
+  app.querySelectorAll(".date-opt").forEach(b => {
+    b.onclick = () => {
+      setDue(b.dataset.due || null);
+      app.querySelectorAll(".date-opt").forEach(x => x.classList.toggle("on", x === b));
+      if (custom) custom.value = "";
+      if (box) box.classList.remove("on");
+    };
+  });
+  if (custom) custom.onchange = () => {
+    if (!custom.value) return;
+    setDue(custom.value);
+    app.querySelectorAll(".date-opt").forEach(x => x.classList.remove("on"));
+    if (box) box.classList.add("on");
+  };
+}
+
 // ── Добавление задачи ───────────────────────────────────────────────────────
 let addDue = null;
 function renderAddForm() {
   addDue = snap.today;
   tg.BackButton.show();
-  const projOpts = Object.entries(snap.projects || {})
-    .map(([id, name]) => `<option value="${id}">${esc(name)}</option>`).join("");
   app.innerHTML = `<div class="big-title">Новая задача</div>
     <div class="form-label">Название</div>
     <input type="text" id="add-name" placeholder="Что нужно сделать?">
     <div class="form-label">Проект</div>
-    <select id="add-proj"><option value="">Без проекта</option>${projOpts}</select>
+    <select id="add-proj">${projectOptions(null)}</select>
     <div class="form-label">Срок</div>
-    <div class="date-row">
-      <button class="date-opt on" data-due="${snap.today}">Сегодня</button>
-      <button class="date-opt" data-due="${isoAddDays(snap.today, 1)}">Завтра</button>
-      <button class="date-opt" data-due="${isoAddDays(snap.today, 7)}">+7 дней</button>
-      <button class="date-opt" data-due="">Без даты</button>
-    </div>
+    ${dateSectionHtml(addDue)}
     <button class="prim-btn" id="add-go">Добавить в буфер</button>`;
   mb.hide();
-  app.querySelectorAll(".date-opt").forEach(b => {
-    b.onclick = () => {
-      addDue = b.dataset.due || null;
-      app.querySelectorAll(".date-opt").forEach(x => x.classList.toggle("on", x === b));
-    };
-  });
+  wireDateSection(v => { addDue = v; });
   document.getElementById("add-go").onclick = () => {
     const name = document.getElementById("add-name").value.trim();
     if (!name) { tg.HapticFeedback.notificationOccurred("error"); return; }
@@ -462,28 +489,15 @@ function renderEditForm(id) {
   editDue = cur.d || null;
   tg.BackButton.show();
   mb.hide();
-  const presets = [
-    ["Сегодня", snap.today], ["Завтра", isoAddDays(snap.today, 1)],
-    ["+7 дней", isoAddDays(snap.today, 7)], ["Без даты", ""]
-  ];
-  const custom = editDue && !presets.some(([, v]) => v === editDue);  // произвольная дата не из пресетов
   app.innerHTML = `<div class="big-title">Редактировать задачу</div>
     <div class="form-label">Название</div>
     <input type="text" id="ed-name" value="${esc(cur.n)}">
     <div class="form-label">Проект</div>
     <select id="ed-proj">${projectOptions(cur.p == null ? null : Number(cur.p))}</select>
-    <div class="form-label">Срок${custom ? " · сейчас: " + esc(fmtDay(editDue)) : ""}</div>
-    <div class="date-row">
-      ${presets.map(([lbl, v]) =>
-        `<button class="date-opt${!custom && (v || null) === editDue ? " on" : ""}" data-due="${v}">${lbl}</button>`).join("")}
-    </div>
+    <div class="form-label">Срок</div>
+    ${dateSectionHtml(editDue)}
     <button class="prim-btn" id="ed-go">Сохранить в буфер</button>`;
-  app.querySelectorAll(".date-opt").forEach(b => {
-    b.onclick = () => {
-      editDue = b.dataset.due || null;
-      app.querySelectorAll(".date-opt").forEach(x => x.classList.toggle("on", x === b));
-    };
-  });
+  wireDateSection(v => { editDue = v; });
   document.getElementById("ed-go").onclick = () => {
     const name = document.getElementById("ed-name").value.trim();
     if (!name) { tg.HapticFeedback.notificationOccurred("error"); return; }
@@ -555,7 +569,8 @@ mb.onClick(async () => {
 // (query-параметры, не hash — проверенный в Telegram путь; hash поддержан для совместимости)
 function syncParams() {
   const qs = new URLSearchParams(window.location.search);
-  if (qs.get("sync")) return { whole: qs.get("sync") };
+  // k=1 — открыто из reply-кнопки «Планировщик» (sendData работает) → сразу дашборд
+  if (qs.get("sync")) return { whole: qs.get("sync"), k: qs.get("k") === "1" };
   if (qs.get("syncf")) {
     const m = qs.get("syncf").match(/^([^:]+):(\d+):(\d+):(.+)$/);
     if (m) return { t: m[1], i: Number(m[2]), n: Number(m[3]), chunk: m[4] };
@@ -576,8 +591,11 @@ async function handleSync() {
   try {
     if (sp.whole) {
       snap = JSON.parse(await gunzipB64(sp.whole));
-      if (!(await csSetBig("snap", snap))) {
-        renderCenter("Не удалось сохранить", "CloudStorage отклонил запись снимка. Запросите новую кнопку: /app");
+      await csSetBig("snap", snap);   // кэшируем; даже при отказе CS покажем из памяти
+      // открыто из reply-кнопки — данные уже свежие, показываем дашборд сразу
+      if (sp.k) {
+        history.replaceState(null, "", location.pathname);
+        render();
         return true;
       }
       renderCenter("Данные обновлены ✓",

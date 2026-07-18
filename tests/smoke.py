@@ -82,6 +82,14 @@ def run():
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
 
+        # ── быстрый путь: reply-кнопка с данными (k=1) → сразу дашборд, без экрана «переоткройте» ──
+        page.goto(f"{url}?sync={payload}&k=1")
+        page.wait_for_selector(".stats", timeout=10000)
+        assert page.locator(".center-box").count() == 0, "k=1 не должен показывать промежуточный экран"
+        assert "12" in page.inner_text(".stats")
+        assert "sync" not in page.url and "k=1" not in page.url    # payload убран из URL
+        page.evaluate("localStorage.clear()")                       # сброс для следующего сценария
+
         # ── синк двумя фрагментами, нарочно в обратном порядке ──
         page.goto(f"{url}?syncf=100:1:2:{chunks[1]}")
         page.wait_for_selector(".center-box", timeout=10000)
@@ -144,11 +152,17 @@ def run():
         assert page.input_value("#ed-name") == "Проверить статистику"   # префилл
         page.fill("#ed-name", "Проверить статистику (ред.)")
         page.select_option("#ed-proj", "21")
-        page.locator("[data-due='2026-07-24']").click()   # +7 дней от 2026-07-17
+        # произвольная дата через нативный date-picker
+        page.fill("#date-custom", "2026-08-15")
+        page.dispatch_event("#date-custom", "change")
+        page.wait_for_timeout(100)
+        assert page.locator(".date-custom.on").count() == 1
+        assert page.locator(".date-opt.on").count() == 0   # пресеты сняты
         page.click("#ed-go")
         page.wait_for_timeout(300)
         assert page.evaluate("window.__mb.text") == "Сохранить изменения (4)"
-        assert "изменена" in page.inner_text("#app").lower()
+        edit_buf = page.evaluate("JSON.parse(localStorage.getItem('planner_pending_v1')).edit")
+        assert edit_buf == {"401": {"n": "Проверить статистику (ред.)", "p": 21, "d": "2026-08-15"}}, edit_buf
 
         # ── батч ──
         mb_click(page)
@@ -158,7 +172,7 @@ def run():
         assert batch["done"] == [341]
         assert batch["postpone"] == {"313": "2026-07-18"}
         assert batch["add"] == [{"n": "Новая задача из теста", "p": 2, "d": "2026-07-18"}]
-        assert batch["edit"] == {"401": {"n": "Проверить статистику (ред.)", "p": 21, "d": "2026-07-24"}}
+        assert batch["edit"] == {"401": {"n": "Проверить статистику (ред.)", "p": 21, "d": "2026-08-15"}}
 
         # оптимистичный снапшот: сделанная задача удалена, перенос применён
         snap = page.evaluate("JSON.parse(localStorage.getItem('cs_snap'))")
@@ -168,7 +182,7 @@ def run():
         assert snap["stats"]["done_week"] == 13
         # правка применена к снапшоту оптимистично
         t401 = [t for t in snap["tasks"] if t["id"] == 401][0]
-        assert t401["n"] == "Проверить статистику (ред.)" and t401["p"] == 21 and t401["d"] == "2026-07-24"
+        assert t401["n"] == "Проверить статистику (ред.)" and t401["p"] == 21 and t401["d"] == "2026-08-15"
         # буфер очищен
         assert page.evaluate("localStorage.getItem('planner_pending_v1')") is None
 
