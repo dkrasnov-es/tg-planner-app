@@ -136,6 +136,20 @@ def run():
         page.wait_for_timeout(300)
         assert page.evaluate("window.__mb.text") == "Сохранить изменения (3)"
 
+        # ── редактирование задачи #401 (имя + проект + срок на +7) ──
+        page.locator("[data-tab=today]").click()
+        page.wait_for_timeout(200)
+        page.locator("[data-edit='401']").click()
+        page.wait_for_selector("#ed-name", timeout=5000)
+        assert page.input_value("#ed-name") == "Проверить статистику"   # префилл
+        page.fill("#ed-name", "Проверить статистику (ред.)")
+        page.select_option("#ed-proj", "21")
+        page.locator("[data-due='2026-07-24']").click()   # +7 дней от 2026-07-17
+        page.click("#ed-go")
+        page.wait_for_timeout(300)
+        assert page.evaluate("window.__mb.text") == "Сохранить изменения (4)"
+        assert "изменена" in page.inner_text("#app").lower()
+
         # ── батч ──
         mb_click(page)
         sent = page.evaluate("window.__sent")
@@ -144,6 +158,7 @@ def run():
         assert batch["done"] == [341]
         assert batch["postpone"] == {"313": "2026-07-18"}
         assert batch["add"] == [{"n": "Новая задача из теста", "p": 2, "d": "2026-07-18"}]
+        assert batch["edit"] == {"401": {"n": "Проверить статистику (ред.)", "p": 21, "d": "2026-07-24"}}
 
         # оптимистичный снапшот: сделанная задача удалена, перенос применён
         snap = page.evaluate("JSON.parse(localStorage.getItem('cs_snap'))")
@@ -151,6 +166,9 @@ def run():
         assert 341 not in ids
         assert [t for t in snap["tasks"] if t["id"] == 313][0]["d"] == "2026-07-18"
         assert snap["stats"]["done_week"] == 13
+        # правка применена к снапшоту оптимистично
+        t401 = [t for t in snap["tasks"] if t["id"] == 401][0]
+        assert t401["n"] == "Проверить статистику (ред.)" and t401["p"] == 21 and t401["d"] == "2026-07-24"
         # буфер очищен
         assert page.evaluate("localStorage.getItem('planner_pending_v1')") is None
 

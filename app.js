@@ -40,6 +40,7 @@ const STYLE = `
   .chip.proj { background: #e8f0fe; color: #3169c6; }
   .over { color: var(--red); font-weight: 600; }
   .moved { color: var(--btn); font-weight: 600; }
+  .t-acts { flex-shrink: 0; display: flex; gap: 2px; }
   .defer { flex-shrink: 0; border: none; background: none; color: var(--hint); font-size: 19px;
     padding: 2px 4px; cursor: pointer; }
   .defer-row { display: flex; gap: 6px; margin-top: 8px; }
@@ -155,22 +156,27 @@ let pending = loadPending();  // буфер несохранённых дейс�
 let openDefer = null;     // id задачи с раскрытым выбором переноса
 
 const PENDING_KEY = "planner_pending_v1";
+function emptyPending() {
+  return { done: [], postpone: {}, add: [], edit: {} };
+}
 function loadPending() {
   try {
-    return JSON.parse(localStorage.getItem(PENDING_KEY) || "null") || { done: [], postpone: {}, add: [] };
-  } catch (e) { return { done: [], postpone: {}, add: [] }; }
+    const p = JSON.parse(localStorage.getItem(PENDING_KEY) || "null") || {};
+    return Object.assign(emptyPending(), p);   // гарантируем все ключи (миграция старого буфера)
+  } catch (e) { return emptyPending(); }
 }
 function savePending() {
   try { localStorage.setItem(PENDING_KEY, JSON.stringify(pending)); } catch (e) {}
   updateMainButton();
 }
 function clearPending() {
-  pending = { done: [], postpone: {}, add: [] };
+  pending = emptyPending();
   try { localStorage.removeItem(PENDING_KEY); } catch (e) {}
   updateMainButton();
 }
 function pendingCount() {
-  return pending.done.length + Object.keys(pending.postpone).length + pending.add.length;
+  return pending.done.length + Object.keys(pending.postpone).length +
+    pending.add.length + Object.keys(pending.edit).length;
 }
 
 // ── Даты ────────────────────────────────────────────────────────────────────
@@ -195,11 +201,18 @@ function daysOverdue(iso) {
 // ── Производные данные (снапшот + буфер поверх) ─────────────────────────────
 function effTasks() {
   const done = new Set(pending.done);
-  const out = snap.tasks.map(t => ({
-    ...t,
-    d: pending.postpone[t.id] || t.d,
-    isDone: done.has(t.id)
-  }));
+  const out = snap.tasks.map(t => {
+    const e = pending.edit[t.id] || {};
+    return {
+      ...t,
+      n: "n" in e ? e.n : t.n,
+      p: "p" in e ? e.p : t.p,
+      // быстрый перенос (⇥) имеет приоритет над сроком из формы правки
+      d: pending.postpone[t.id] || ("d" in e ? e.d : t.d),
+      isDone: done.has(t.id),
+      isEdited: !!pending.edit[t.id]
+    };
+  });
   pending.add.forEach((a, i) => out.push({
     id: "new" + i, n: a.n, p: a.p, pr: a.pr || 2, d: a.d, isDone: false, isNew: true
   }));
@@ -251,6 +264,7 @@ function taskCard(x, opts) {
   const pn = projName(x.p);
   if (pn) meta.push(`<span class="chip proj">${esc(pn.slice(0, 22))}</span>`);
   if (x.isNew) meta.push(`<span class="moved">новая</span>`);
+  if (x.isEdited) meta.push(`<span class="moved">изменена</span>`);
   if (pending.postpone[x.id]) meta.push(`<span class="moved">→ ${esc(fmtDay(x.d))}</span>`);
   else if (x.d && x.d < snap.today) meta.push(`<span class="over">${daysOverdue(x.d)} дн.</span>`);
   else if (x.d && x.d > snap.today) meta.push(`<span>${esc(fmtDay(x.d))}</span>`);
@@ -271,7 +285,10 @@ function taskCard(x, opts) {
         <div class="t-name${x.isDone ? " done" : ""}">${esc(x.n)}</div>
         <div class="t-meta">${meta.join("")}</div>
       </div>
-      ${withDefer && !x.isNew && !x.isDone ? `<button class="defer" data-open-defer="${x.id}">⇥</button>` : ""}
+      ${!x.isNew && !x.isDone ? `<div class="t-acts">
+        <button class="defer" data-edit="${x.id}">✎</button>
+        ${withDefer ? `<button class="defer" data-open-defer="${x.id}">⇥</button>` : ""}
+      </div>` : ""}
     </div>${deferHtml}</div>`;
 }
 
@@ -352,6 +369,9 @@ function bindTaskHandlers() {
       render();
     };
   });
+  app.querySelectorAll("[data-edit]").forEach(el => {
+    el.onclick = () => renderEditForm(Number(el.dataset.edit));
+  });
   app.querySelectorAll("[data-defer]").forEach(el => {
     el.onclick = () => {
       const id = Number(el.dataset.defer);
@@ -419,6 +439,69 @@ function closeSub() {
   render();
 }
 
+// Опции <select> проектов; текущий проект задачи добавляется, даже если он
+// не «In Progress» (в снапшоте таких нет) — иначе правка случайно его сбросит.
+function projectOptions(selectedPid) {
+  const projs = Object.entries(snap.projects || {});
+  const has = selectedPid != null && projs.some(([id]) => Number(id) === selectedPid);
+  let out = `<option value=""${selectedPid == null ? " selected" : ""}>Без проекта</option>`;
+  if (selectedPid != null && !has) {
+    out += `<option value="${selectedPid}" selected>${esc(projName(selectedPid) || "Проект #" + selectedPid)}</option>`;
+  }
+  out += projs.map(([id, name]) =>
+    `<option value="${id}"${Number(id) === selectedPid ? " selected" : ""}>${esc(name)}</option>`).join("");
+  return out;
+}
+
+// ── Редактирование задачи ─────────────────────────────────────────────────────
+let editDue = null;
+function renderEditForm(id) {
+  const orig = snap.tasks.find(t => t.id === id);
+  if (!orig) { render(); return; }
+  const cur = Object.assign({}, orig, pending.edit[id] || {});  // эффективные значения
+  editDue = cur.d || null;
+  tg.BackButton.show();
+  mb.hide();
+  const presets = [
+    ["Сегодня", snap.today], ["Завтра", isoAddDays(snap.today, 1)],
+    ["+7 дней", isoAddDays(snap.today, 7)], ["Без даты", ""]
+  ];
+  const custom = editDue && !presets.some(([, v]) => v === editDue);  // произвольная дата не из пресетов
+  app.innerHTML = `<div class="big-title">Редактировать задачу</div>
+    <div class="form-label">Название</div>
+    <input type="text" id="ed-name" value="${esc(cur.n)}">
+    <div class="form-label">Проект</div>
+    <select id="ed-proj">${projectOptions(cur.p == null ? null : Number(cur.p))}</select>
+    <div class="form-label">Срок${custom ? " · сейчас: " + esc(fmtDay(editDue)) : ""}</div>
+    <div class="date-row">
+      ${presets.map(([lbl, v]) =>
+        `<button class="date-opt${!custom && (v || null) === editDue ? " on" : ""}" data-due="${v}">${lbl}</button>`).join("")}
+    </div>
+    <button class="prim-btn" id="ed-go">Сохранить в буфер</button>`;
+  app.querySelectorAll(".date-opt").forEach(b => {
+    b.onclick = () => {
+      editDue = b.dataset.due || null;
+      app.querySelectorAll(".date-opt").forEach(x => x.classList.toggle("on", x === b));
+    };
+  });
+  document.getElementById("ed-go").onclick = () => {
+    const name = document.getElementById("ed-name").value.trim();
+    if (!name) { tg.HapticFeedback.notificationOccurred("error"); return; }
+    const selP = document.getElementById("ed-proj").value;
+    const newP = selP ? Number(selP) : null;
+    const changes = {};
+    if (name !== orig.n) changes.n = name;
+    if (newP !== (orig.p == null ? null : Number(orig.p))) changes.p = newP;
+    if ((editDue || null) !== (orig.d || null)) changes.d = editDue || null;
+    if (Object.keys(changes).length) pending.edit[id] = changes;
+    else delete pending.edit[id];
+    savePending();
+    tg.HapticFeedback.impactOccurred("light");
+    closeSub();
+  };
+  tg.BackButton.onClick(closeSub);
+}
+
 function renderTabbar() {
   let bar = document.getElementById("tabbar");
   if (!bar) {
@@ -448,10 +531,20 @@ mb.onClick(async () => {
   // переоткрытия приложение показывало актуальное без синка
   const doneSet = new Set(pending.done);
   snap.tasks = snap.tasks.filter(t => !doneSet.has(t.id));
-  snap.tasks.forEach(t => { if (pending.postpone[t.id]) t.d = pending.postpone[t.id]; });
+  snap.tasks.forEach(t => {
+    const e = pending.edit[t.id];
+    if (e) {
+      if ("n" in e) t.n = e.n;
+      if ("p" in e) t.p = e.p;
+      if ("d" in e) t.d = e.d;
+    }
+    if (pending.postpone[t.id]) t.d = pending.postpone[t.id];
+  });
   if (snap.stats) snap.stats.done_week = (snap.stats.done_week || 0) + pending.done.length;
   await csSetBig("snap", snap);
-  const payload = JSON.stringify({ v: 1, done: pending.done, postpone: pending.postpone, add: pending.add });
+  const payload = JSON.stringify({
+    v: 1, done: pending.done, postpone: pending.postpone, add: pending.add, edit: pending.edit
+  });
   clearPending();
   tg.HapticFeedback.notificationOccurred("success");
   tg.sendData(payload);   // закроет приложение; бот применит и пришлёт свежий синк
