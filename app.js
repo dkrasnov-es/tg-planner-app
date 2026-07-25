@@ -47,9 +47,15 @@ const STYLE = `
   .defer-opt { flex: 1; border: none; border-radius: 9px; background: var(--bg); color: var(--text);
     font-size: 12.5px; font-weight: 600; padding: 8px 2px; cursor: pointer; }
   .stats { display: flex; gap: 8px; margin: 4px 12px 6px; }
-  .stat { flex: 1; background: var(--card); border-radius: 13px; padding: 11px 6px; text-align: center; }
+  .stat { flex: 1; background: var(--card); border-radius: 13px; padding: 11px 6px; text-align: center; cursor: pointer; }
+  .stat:active { opacity: .6; }
   .stat .n { font-size: 23px; font-weight: 800; }
   .stat .l { font-size: 10.5px; color: var(--hint); margin-top: 1px; }
+  .scope-row { display: flex; gap: 6px; overflow-x: auto; padding: 2px 12px 8px; -webkit-overflow-scrolling: touch; }
+  .scope-row::-webkit-scrollbar { display: none; }
+  .scope-chip { flex: 0 0 auto; background: var(--card); color: var(--hint); border: none;
+    border-radius: 999px; font-size: 12.5px; font-weight: 600; padding: 7px 13px; cursor: pointer; white-space: nowrap; }
+  .scope-chip.on { background: var(--btn); color: #fff; }
   .n.red { color: var(--red); } .n.blue { color: var(--btn); } .n.green { color: var(--green); }
   .focus { background: linear-gradient(135deg, var(--btn), #1a5fa8); border-radius: 15px;
     margin: 0 12px 8px; padding: 13px 15px; color: #fff; }
@@ -154,7 +160,8 @@ async function csGetBig(key) {
 
 // ── Состояние ───────────────────────────────────────────────────────────────
 let snap = null;          // снапшот данных от бота
-let tab = "dash";         // dash | today
+let tab = "dash";         // dash | list
+let scope = "today";      // today | tomorrow | week | nextweek | overdue | doneweek
 let pending = loadPending();  // буфер несохранённых действий
 let openDefer = null;     // id задачи с раскрытым выбором переноса
 
@@ -188,6 +195,17 @@ function isoAddDays(iso, days) {
   d.setDate(d.getDate() + days);
   const p = n => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+// Понедельник календарной недели, содержащей iso (+ offsetWeeks недель).
+function weekMonday(iso, offsetWeeks) {
+  const d = new Date(iso + "T00:00:00");
+  const dow = (d.getDay() + 6) % 7;   // 0=пн … 6=вс
+  return isoAddDays(iso, -dow + (offsetWeeks || 0) * 7);
+}
+// [понедельник, воскресенье] недели (offsetWeeks: 0=текущая, 1=следующая).
+function weekBounds(iso, offsetWeeks) {
+  const mon = weekMonday(iso, offsetWeeks);
+  return [mon, isoAddDays(mon, 6)];
 }
 const MONTHS_RU = ["янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
 const DOW_RU = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
@@ -242,7 +260,7 @@ function projName(pid) {
 // ── Отрисовка ───────────────────────────────────────────────────────────────
 function render() {
   if (tab === "dash") renderDash();
-  else renderToday();
+  else renderList();
   renderTabbar();
   updateMainButton();
 }
@@ -303,9 +321,9 @@ function renderDash() {
   const focusTasks = focusIds.map(id => all.find(x => x.id === id)).filter(Boolean);
   let html = header("Планировщик");
   html += `<div class="stats">
-    <div class="stat"><div class="n blue">${g.today.filter(x => !x.isDone).length}</div><div class="l">сегодня</div></div>
-    <div class="stat"><div class="n red">${g.overdue.filter(x => !x.isDone).length}</div><div class="l">просрочено</div></div>
-    <div class="stat"><div class="n green">${(snap.stats && snap.stats.done_week) || 0}</div><div class="l">за неделю ✓</div></div>
+    <div class="stat" data-scope="today"><div class="n blue">${g.today.filter(x => !x.isDone).length}</div><div class="l">сегодня</div></div>
+    <div class="stat" data-scope="overdue"><div class="n red">${g.overdue.filter(x => !x.isDone).length}</div><div class="l">просрочено</div></div>
+    <div class="stat" data-scope="doneweek"><div class="n green">${(snap.stats && snap.stats.done_week) || 0}</div><div class="l">за неделю ✓</div></div>
   </div>`;
   if (focusTasks.length) {
     html += `<div class="sec"><span>Фокус дня</span></div>`;
@@ -337,27 +355,89 @@ function renderDash() {
       <div class="rit-st">${r.evening ? "✓" : "·"}</div></div>`;
   app.innerHTML = html;
   document.getElementById("qa-add").onclick = () => renderAddForm();
-  document.getElementById("qa-overdue").onclick = () => { tab = "today"; render(); window.scrollTo(0, 0); };
+  document.getElementById("qa-overdue").onclick = () => { tab = "list"; scope = "overdue"; render(); window.scrollTo(0, 0); };
+  app.querySelectorAll(".stat[data-scope]").forEach(el => {
+    el.onclick = () => { tab = "list"; scope = el.dataset.scope; render(); window.scrollTo(0, 0); };
+  });
   app.querySelectorAll("[data-focus]").forEach(el => {
     el.onclick = () => toggleDone(el.dataset.focus);
   });
 }
 
-function renderToday() {
-  const g = grouped();
-  let html = header("Сегодня");
-  if (g.overdue.length) {
-    html += `<div class="sec"><span class="red">Просроченные</span><span>${g.overdue.length}</span></div>`;
-    g.overdue.forEach(x => { html += taskCard(x, { defer: true }); });
-  }
-  html += `<div class="sec"><span>Сегодня</span><span>${g.today.length}</span></div>`;
-  if (g.today.length) g.today.forEach(x => { html += taskCard(x, { defer: true }); });
-  else html += `<div class="empty">На сегодня задач нет 🎉</div>`;
-  if (g.upcoming.length) {
-    html += `<div class="sec"><span>Ближайшие 7 дней</span><span>${g.upcoming.length}</span></div>`;
-    g.upcoming.forEach(x => { html += taskCard(x, {}); });
+const SCOPES = [
+  ["today", "Сегодня"], ["tomorrow", "Завтра"],
+  ["week", "Эта неделя"], ["nextweek", "След. неделя"],
+  ["overdue", "Просрочка"], ["doneweek", "Готово ✓"],
+];
+function scopeTitle() {
+  return ({ today: "Сегодня", tomorrow: "Завтра", week: "Эта неделя",
+    nextweek: "Следующая неделя", overdue: "Просроченные", doneweek: "Сделано за неделю" })[scope] || "Задачи";
+}
+function scopeChipsHtml() {
+  return `<div class="scope-row">` + SCOPES.map(([s, l]) =>
+    `<button class="scope-chip${scope === s ? " on" : ""}" data-scope="${s}">${l}</button>`).join("") + `</div>`;
+}
+// Активные задачи в диапазоне дат [from, to] включительно, сгруппированные по дню.
+function rangeGroupedHtml(from, to) {
+  const items = effTasks().filter(x => x.d && x.d >= from && x.d <= to && !x.isDone)
+    .sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : a.pr - b.pr));
+  if (!items.length) return `<div class="empty">Задач нет 🎉</div>`;
+  let html = "", curDay = null;
+  items.forEach(x => {
+    if (x.d !== curDay) { curDay = x.d; html += `<div class="sec"><span>${esc(fmtDay(x.d))}</span></div>`; }
+    html += taskCard(x, { defer: true });
+  });
+  return html;
+}
+function doneCard(t) {
+  const pn = projName(t.p);
+  const meta = [pn ? `<span class="chip proj">${esc(pn.slice(0, 22))}</span>` : "",
+    (t.cd || t.d) ? `<span>${esc(fmtDay(t.cd || t.d))}</span>` : ""].filter(Boolean).join("");
+  return `<div class="card"><div class="task">
+    <div class="cb on" style="background:var(--btn);border-color:var(--btn)"></div>
+    <div class="t-body"><div class="t-name done">${esc(t.n)}</div><div class="t-meta">${meta}</div></div>
+  </div></div>`;
+}
+function renderList() {
+  let html = header(scopeTitle());
+  html += scopeChipsHtml();
+  if (scope === "today") {
+    const g = grouped();
+    if (g.overdue.length) {
+      html += `<div class="sec"><span class="red">Просроченные</span><span>${g.overdue.length}</span></div>`;
+      g.overdue.forEach(x => { html += taskCard(x, { defer: true }); });
+    }
+    html += `<div class="sec"><span>Сегодня</span><span>${g.today.length}</span></div>`;
+    if (g.today.length) g.today.forEach(x => { html += taskCard(x, { defer: true }); });
+    else html += `<div class="empty">На сегодня задач нет 🎉</div>`;
+    if (g.upcoming.length) {
+      html += `<div class="sec"><span>Ближайшие 7 дней</span><span>${g.upcoming.length}</span></div>`;
+      g.upcoming.forEach(x => { html += taskCard(x, {}); });
+    }
+  } else if (scope === "tomorrow") {
+    const tm = isoAddDays(snap.today, 1);
+    html += rangeGroupedHtml(tm, tm);
+  } else if (scope === "week") {
+    const [mon, sun] = weekBounds(snap.today, 0);
+    html += rangeGroupedHtml(mon, sun);
+  } else if (scope === "nextweek") {
+    const [mon, sun] = weekBounds(snap.today, 1);
+    html += rangeGroupedHtml(mon, sun);
+  } else if (scope === "overdue") {
+    const od = effTasks().filter(x => x.d && x.d < snap.today && !x.isDone)
+      .sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : a.pr - b.pr));
+    if (!od.length) html += `<div class="empty">Просроченных нет 🎉</div>`;
+    else od.forEach(x => { html += taskCard(x, { defer: true }); });
+  } else if (scope === "doneweek") {
+    const done = (snap.done_week_tasks || []).slice()
+      .sort((a, b) => ((a.cd || a.d || "") < (b.cd || b.d || "") ? 1 : -1));
+    if (!done.length) html += `<div class="empty">За неделю ничего не выполнено</div>`;
+    else done.forEach(t => { html += doneCard(t); });
   }
   app.innerHTML = html;
+  app.querySelectorAll(".scope-chip[data-scope]").forEach(el => {
+    el.onclick = () => { scope = el.dataset.scope; openDefer = null; render(); window.scrollTo(0, 0); };
+  });
   bindTaskHandlers();
 }
 
@@ -526,7 +606,7 @@ function renderTabbar() {
   }
   bar.innerHTML = `
     <div class="tab${tab === "dash" ? " on" : ""}" data-tab="dash"><span class="ic">🏠</span>Дашборд</div>
-    <div class="tab${tab === "today" ? " on" : ""}" data-tab="today"><span class="ic">☀️</span>Сегодня</div>`;
+    <div class="tab${tab === "list" ? " on" : ""}" data-tab="list"><span class="ic">📋</span>Задачи</div>`;
   bar.querySelectorAll(".tab").forEach(el => {
     el.onclick = () => { tab = el.dataset.tab; openDefer = null; render(); window.scrollTo(0, 0); };
   });
