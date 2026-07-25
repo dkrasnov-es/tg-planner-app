@@ -167,7 +167,7 @@ let openDefer = null;     // id задачи с раскрытым выборо�
 
 const PENDING_KEY = "planner_pending_v1";
 function emptyPending() {
-  return { done: [], postpone: {}, add: [], edit: {} };
+  return { done: [], postpone: {}, add: [], edit: {}, addProject: [] };
 }
 function loadPending() {
   try {
@@ -186,7 +186,7 @@ function clearPending() {
 }
 function pendingCount() {
   return pending.done.length + Object.keys(pending.postpone).length +
-    pending.add.length + Object.keys(pending.edit).length;
+    pending.add.length + Object.keys(pending.edit).length + pending.addProject.length;
 }
 
 // ── Даты ────────────────────────────────────────────────────────────────────
@@ -254,6 +254,10 @@ function grouped() {
   return g;
 }
 function projName(pid) {
+  if (typeof pid === "string" && pid.startsWith("new:")) {
+    const np = pending.addProject[Number(pid.slice(4))];
+    return np ? np.n + " (новый)" : null;
+  }
   return (snap.projects && snap.projects[pid]) || null;
 }
 
@@ -341,6 +345,7 @@ function renderDash() {
   html += `<div class="sec"><span>Быстрые действия</span></div>
     <div class="qa-row">
       <button class="qa" id="qa-add"><span class="ic">＋</span>Задача</button>
+      <button class="qa" id="qa-add-proj"><span class="ic">📁</span>Проект</button>
       <button class="qa" id="qa-overdue"><span class="ic">📥</span>Просрочка (${g.overdue.filter(x => !x.isDone).length})</button>
     </div>`;
   const r = snap.rituals || {};
@@ -355,6 +360,7 @@ function renderDash() {
       <div class="rit-st">${r.evening ? "✓" : "·"}</div></div>`;
   app.innerHTML = html;
   document.getElementById("qa-add").onclick = () => renderAddForm();
+  document.getElementById("qa-add-proj").onclick = () => renderAddProjectForm();
   document.getElementById("qa-overdue").onclick = () => { tab = "list"; scope = "overdue"; render(); window.scrollTo(0, 0); };
   app.querySelectorAll(".stat[data-scope]").forEach(el => {
     el.onclick = () => { tab = "list"; scope = el.dataset.scope; render(); window.scrollTo(0, 0); };
@@ -389,6 +395,19 @@ function rangeGroupedHtml(from, to) {
   });
   return html;
 }
+// Просроченные (срок < сегодня, не выполнены), отсортированные.
+function overdueItems() {
+  return effTasks().filter(x => x.d && x.d < snap.today && !x.isDone)
+    .sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : a.pr - b.pr));
+}
+// Секция «Просроченные» с карточками (пусто, если просрочек нет).
+function overdueSectionHtml() {
+  const od = overdueItems();
+  if (!od.length) return "";
+  let h = `<div class="sec"><span class="red">Просроченные</span><span>${od.length}</span></div>`;
+  od.forEach(x => { h += taskCard(x, { defer: true }); });
+  return h;
+}
 function doneCard(t) {
   const pn = projName(t.p);
   const meta = [pn ? `<span class="chip proj">${esc(pn.slice(0, 22))}</span>` : "",
@@ -418,14 +437,18 @@ function renderList() {
     const tm = isoAddDays(snap.today, 1);
     html += rangeGroupedHtml(tm, tm);
   } else if (scope === "week") {
-    const [mon, sun] = weekBounds(snap.today, 0);
-    html += rangeGroupedHtml(mon, sun);
+    // Текущая неделя: сверху все просроченные, затем задачи с сегодня до вс.
+    const [, sun] = weekBounds(snap.today, 0);
+    const od = overdueSectionHtml();
+    html += od;
+    const hasRange = effTasks().some(x => x.d && x.d >= snap.today && x.d <= sun && !x.isDone);
+    if (hasRange) html += rangeGroupedHtml(snap.today, sun);
+    else if (!od) html += `<div class="empty">На этой неделе задач нет 🎉</div>`;
   } else if (scope === "nextweek") {
     const [mon, sun] = weekBounds(snap.today, 1);
     html += rangeGroupedHtml(mon, sun);
   } else if (scope === "overdue") {
-    const od = effTasks().filter(x => x.d && x.d < snap.today && !x.isDone)
-      .sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : a.pr - b.pr));
+    const od = overdueItems();
     if (!od.length) html += `<div class="empty">Просроченных нет 🎉</div>`;
     else od.forEach(x => { html += taskCard(x, { defer: true }); });
   } else if (scope === "doneweek") {
@@ -533,8 +556,8 @@ function renderAddForm() {
   document.getElementById("add-go").onclick = () => {
     const name = document.getElementById("add-name").value.trim();
     if (!name) { tg.HapticFeedback.notificationOccurred("error"); return; }
-    const pid = document.getElementById("add-proj").value;
-    pending.add.push({ n: name, p: pid ? Number(pid) : null, d: addDue });
+    const pid = parseProjVal(document.getElementById("add-proj").value);
+    pending.add.push({ n: name, p: pid, d: addDue });
     savePending();
     tg.HapticFeedback.impactOccurred("light");
     closeSub();
@@ -546,6 +569,47 @@ function closeSub() {
   render();
 }
 
+// ── Добавление проекта ──────────────────────────────────────────────────────
+function renderAddProjectForm() {
+  tg.BackButton.show();
+  mb.hide();
+  const existing = pending.addProject.length
+    ? `<div class="sec"><span>Новые проекты в буфере</span></div>` +
+      pending.addProject.map((np, i) =>
+        `<div class="card"><div class="task"><div class="t-body">
+          <div class="t-name">📁 ${esc(np.n)}</div><div class="t-meta">будет создан при сохранении</div>
+        </div><div class="t-acts"><button class="defer" data-del-proj="${i}">✕</button></div></div></div>`).join("")
+    : "";
+  app.innerHTML = `<div class="big-title">Новый проект</div>
+    <div class="form-label">Название проекта</div>
+    <input type="text" id="proj-name" placeholder="Например: Ремонт квартиры">
+    <button class="prim-btn" id="proj-go">Добавить в буфер</button>
+    ${existing}`;
+  const input = document.getElementById("proj-name");
+  input.focus();
+  document.getElementById("proj-go").onclick = () => {
+    const name = input.value.trim();
+    if (!name) { tg.HapticFeedback.notificationOccurred("error"); return; }
+    pending.addProject.push({ n: name });
+    savePending();
+    tg.HapticFeedback.impactOccurred("light");
+    renderAddProjectForm();   // остаёмся в форме — видно буфер, можно добавить ещё
+  };
+  app.querySelectorAll("[data-del-proj]").forEach(el => {
+    el.onclick = () => {
+      pending.addProject.splice(Number(el.dataset.delProj), 1);
+      savePending();
+      renderAddProjectForm();
+    };
+  });
+  tg.BackButton.onClick(closeSub);
+}
+
+// Значение <select> проектов → p для буфера: "" → null, "new:i" → строка, иначе число.
+function parseProjVal(v) {
+  if (!v) return null;
+  return v.startsWith("new:") ? v : Number(v);
+}
 // Опции <select> проектов; текущий проект задачи добавляется, даже если он
 // не «In Progress» (в снапшоте таких нет) — иначе правка случайно его сбросит.
 function projectOptions(selectedPid) {
@@ -557,6 +621,9 @@ function projectOptions(selectedPid) {
   }
   out += projs.map(([id, name]) =>
     `<option value="${id}"${Number(id) === selectedPid ? " selected" : ""}>${esc(name)}</option>`).join("");
+  // Несохранённые проекты из буфера — можно сразу назначить задаче (id вида "new:i")
+  out += pending.addProject.map((np, i) =>
+    `<option value="new:${i}"${selectedPid === "new:" + i ? " selected" : ""}>${esc(np.n)} (новый)</option>`).join("");
   return out;
 }
 
@@ -573,7 +640,9 @@ function renderEditForm(id) {
     <div class="form-label">Название</div>
     <input type="text" id="ed-name" value="${esc(cur.n)}">
     <div class="form-label">Проект</div>
-    <select id="ed-proj">${projectOptions(cur.p == null ? null : Number(cur.p))}</select>
+    <select id="ed-proj">${projectOptions(
+      typeof cur.p === "string" && cur.p.startsWith("new:") ? cur.p
+        : (cur.p == null ? null : Number(cur.p)))}</select>
     <div class="form-label">Срок</div>
     ${dateSectionHtml(editDue)}
     <button class="prim-btn" id="ed-go">Сохранить в буфер</button>`;
@@ -581,8 +650,7 @@ function renderEditForm(id) {
   document.getElementById("ed-go").onclick = () => {
     const name = document.getElementById("ed-name").value.trim();
     if (!name) { tg.HapticFeedback.notificationOccurred("error"); return; }
-    const selP = document.getElementById("ed-proj").value;
-    const newP = selP ? Number(selP) : null;
+    const newP = parseProjVal(document.getElementById("ed-proj").value);
     const changes = {};
     if (name !== orig.n) changes.n = name;
     if (newP !== (orig.p == null ? null : Number(orig.p))) changes.p = newP;
@@ -633,11 +701,14 @@ mb.onClick(async () => {
       if ("d" in e) t.d = e.d;
     }
     if (pending.postpone[t.id]) t.d = pending.postpone[t.id];
+    // временные проекты ("new:i") реальный id получат после синка от бота
+    if (typeof t.p === "string" && t.p.startsWith("new:")) t.p = null;
   });
   if (snap.stats) snap.stats.done_week = (snap.stats.done_week || 0) + pending.done.length;
   await csSetBig("snap", snap);
   const payload = JSON.stringify({
-    v: 1, done: pending.done, postpone: pending.postpone, add: pending.add, edit: pending.edit
+    v: 1, done: pending.done, postpone: pending.postpone,
+    add: pending.add, edit: pending.edit, addProject: pending.addProject
   });
   clearPending();
   tg.HapticFeedback.notificationOccurred("success");
