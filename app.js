@@ -190,6 +190,14 @@ function pendingCount() {
 }
 
 // ── Даты ────────────────────────────────────────────────────────────────────
+// «Сегодня» по локальным часам устройства пользователя, а НЕ по snap.today:
+// снапшот в CloudStorage может устареть (построен вчера) и заморозить дату —
+// тогда кнопка «Сегодня» ставила вчерашний срок. Клиентская дата всегда актуальна.
+function todayISO() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
 function isoAddDays(iso, days) {
   const d = new Date(iso + "T00:00:00");
   d.setDate(d.getDate() + days);
@@ -215,7 +223,7 @@ function fmtDay(iso) {
   return `${DOW_RU[d.getDay()]}, ${d.getDate()} ${MONTHS_RU[d.getMonth()]}`;
 }
 function daysOverdue(iso) {
-  const ms = new Date(snap.today + "T00:00:00") - new Date(iso + "T00:00:00");
+  const ms = new Date(todayISO() + "T00:00:00") - new Date(iso + "T00:00:00");
   return Math.round(ms / 86400000);
 }
 
@@ -240,7 +248,7 @@ function effTasks() {
   return out;
 }
 function grouped() {
-  const t = snap.today;
+  const t = todayISO();
   const week = isoAddDays(t, 7);
   const g = { overdue: [], today: [], upcoming: [] };
   effTasks().forEach(x => {
@@ -272,7 +280,7 @@ function render() {
 function header(title) {
   const stale = snap.ts ? staleText(snap.ts) : "";
   return `<div class="hdr"><h1>${title}</h1>
-    <div class="sub">${esc(fmtDay(snap.today))}${stale}</div></div>`;
+    <div class="sub">${esc(fmtDay(todayISO()))}${stale}</div></div>`;
 }
 function staleText(ts) {
   const ageH = (Date.now() - new Date(ts).getTime()) / 3600000;
@@ -291,14 +299,14 @@ function taskCard(x, opts) {
   if (x.isNew) meta.push(`<span class="moved">новая</span>`);
   if (x.isEdited) meta.push(`<span class="moved">изменена</span>`);
   if (pending.postpone[x.id]) meta.push(`<span class="moved">→ ${esc(fmtDay(x.d))}</span>`);
-  else if (x.d && x.d < snap.today) meta.push(`<span class="over">${daysOverdue(x.d)} дн.</span>`);
-  else if (x.d && x.d > snap.today) meta.push(`<span>${esc(fmtDay(x.d))}</span>`);
+  else if (x.d && x.d < todayISO()) meta.push(`<span class="over">${daysOverdue(x.d)} дн.</span>`);
+  else if (x.d && x.d > todayISO()) meta.push(`<span>${esc(fmtDay(x.d))}</span>`);
   let deferHtml = "";
   if (openDefer === x.id) {
     deferHtml = `<div class="defer-row">
-      <button class="defer-opt" data-defer="${x.id}" data-to="${snap.today}">Сегодня</button>
-      <button class="defer-opt" data-defer="${x.id}" data-to="${isoAddDays(snap.today, 1)}">Завтра</button>
-      <button class="defer-opt" data-defer="${x.id}" data-to="${isoAddDays(snap.today, 7)}">+7 дней</button>
+      <button class="defer-opt" data-defer="${x.id}" data-to="${todayISO()}">Сегодня</button>
+      <button class="defer-opt" data-defer="${x.id}" data-to="${isoAddDays(todayISO(), 1)}">Завтра</button>
+      <button class="defer-opt" data-defer="${x.id}" data-to="${isoAddDays(todayISO(), 7)}">+7 дней</button>
       <button class="defer-opt" data-defer="${x.id}" data-to="">✕</button>
     </div>`;
   }
@@ -334,7 +342,7 @@ function renderDash() {
     focusTasks.forEach((x, i) => {
       const pn = projName(x.p);
       const sub = [pn, x.pr === 1 ? "P1" : null,
-        x.d && x.d < snap.today ? `просрочена ${daysOverdue(x.d)} дн.` : null].filter(Boolean).join(" · ");
+        x.d && x.d < todayISO() ? `просрочена ${daysOverdue(x.d)} дн.` : null].filter(Boolean).join(" · ");
       html += `<div class="focus${i ? " mini" : ""}${x.isDone ? " done-card" : ""}" data-focus="${x.id}">
         <div class="fl">${i === 0 ? "Главная задача" : (i === 1 ? "Вторая" : "Третья")}${x.isDone ? " · сделана ✓" : ""}</div>
         <div class="fn">${esc(x.n)}</div>
@@ -397,7 +405,8 @@ function rangeGroupedHtml(from, to) {
 }
 // Просроченные (срок < сегодня, не выполнены), отсортированные.
 function overdueItems() {
-  return effTasks().filter(x => x.d && x.d < snap.today && !x.isDone)
+  const t = todayISO();
+  return effTasks().filter(x => x.d && x.d < t && !x.isDone)
     .sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : a.pr - b.pr));
 }
 // Секция «Просроченные» с карточками (пусто, если просрочек нет).
@@ -434,18 +443,19 @@ function renderList() {
       g.upcoming.forEach(x => { html += taskCard(x, {}); });
     }
   } else if (scope === "tomorrow") {
-    const tm = isoAddDays(snap.today, 1);
+    const tm = isoAddDays(todayISO(), 1);
     html += rangeGroupedHtml(tm, tm);
   } else if (scope === "week") {
     // Текущая неделя: сверху все просроченные, затем задачи с сегодня до вс.
-    const [, sun] = weekBounds(snap.today, 0);
+    const t = todayISO();
+    const [, sun] = weekBounds(t, 0);
     const od = overdueSectionHtml();
     html += od;
-    const hasRange = effTasks().some(x => x.d && x.d >= snap.today && x.d <= sun && !x.isDone);
-    if (hasRange) html += rangeGroupedHtml(snap.today, sun);
+    const hasRange = effTasks().some(x => x.d && x.d >= t && x.d <= sun && !x.isDone);
+    if (hasRange) html += rangeGroupedHtml(t, sun);
     else if (!od) html += `<div class="empty">На этой неделе задач нет 🎉</div>`;
   } else if (scope === "nextweek") {
-    const [mon, sun] = weekBounds(snap.today, 1);
+    const [mon, sun] = weekBounds(todayISO(), 1);
     html += rangeGroupedHtml(mon, sun);
   } else if (scope === "overdue") {
     const od = overdueItems();
@@ -504,8 +514,8 @@ function toggleDone(id) {
 
 // ── Секция выбора срока (пресеты + произвольная дата) ─────────────────────────
 function datePresets() {
-  return [["Сегодня", snap.today], ["Завтра", isoAddDays(snap.today, 1)],
-    ["+7 дней", isoAddDays(snap.today, 7)], ["Без даты", ""]];
+  return [["Сегодня", todayISO()], ["Завтра", isoAddDays(todayISO(), 1)],
+    ["+7 дней", isoAddDays(todayISO(), 7)], ["Без даты", ""]];
 }
 function dateSectionHtml(sel) {
   const presets = datePresets();
@@ -541,7 +551,7 @@ function wireDateSection(setDue) {
 // ── Добавление задачи ───────────────────────────────────────────────────────
 let addDue = null;
 function renderAddForm() {
-  addDue = snap.today;
+  addDue = todayISO();
   tg.BackButton.show();
   app.innerHTML = `<div class="big-title">Новая задача</div>
     <div class="form-label">Название</div>
