@@ -1,5 +1,6 @@
 # Смоук-тест Mini App планировщика: синк фрагментами → дашборд/список →
-# фильтр по проектам → действия (сделано/перенос/добавление/правка/удаление) →
+# фильтры по проектам и приоритетам → действия (сделано/перенос/добавление/
+# правка/удаление) →
 # батч sendData + оптимистичный снапшот.
 # Запуск: python3 tests/smoke.py
 import base64
@@ -47,10 +48,12 @@ SNAPSHOT = {
     "today": d(0),
     "projects": {"2": "Это База", "21": "Здоровье"},
     "tasks": [
-        {"id": 341, "n": "Прописать use cases", "p": 2, "pr": 1, "d": d(-38)},
-        {"id": 313, "n": "Изменить дизайн лендинга", "p": 2, "pr": 2, "d": d(-37)},
+        # 341 старше 313, но приоритет ниже — проверяем, что приоритет главнее даты
+        {"id": 341, "n": "Прописать use cases", "p": 2, "pr": 2, "d": d(-38)},
+        {"id": 313, "n": "Изменить дизайн лендинга", "p": 2, "pr": 1, "d": d(-37)},
         {"id": 400, "n": "Утренняя зарядка", "p": 21, "pr": 2, "d": d(0)},
-        {"id": 401, "n": "Проверить статистику", "p": 2, "pr": 2, "d": d(0)},
+        {"id": 401, "n": "Проверить статистику", "p": 2, "pr": 3, "d": d(0)},
+        {"id": 405, "n": "Срочный звонок", "p": 2, "pr": 1, "d": d(0)},
         {"id": 402, "n": "Подготовить отчёт", "p": 2, "pr": 2, "d": d(2)},
         {"id": 403, "n": "Бэклог без даты", "p": 2, "pr": 2, "d": None},
         {"id": 404, "n": "Личное дело", "p": None, "pr": 2, "d": d(0)},
@@ -120,7 +123,7 @@ def run():
         stats = page.inner_text(".stats")
         assert "12" in stats, stats                    # done_week
         nums = page.locator(".stat .n").all_inner_texts()
-        assert nums == ["3", "2", "12"], nums          # сегодня(3) просрочено(2) неделя(12)
+        assert nums == ["4", "2", "12"], nums          # сегодня(4) просрочено(2) неделя(12)
         assert page.locator(".focus").count() == 3
         assert "Прописать use cases" in page.inner_text(".focus")
 
@@ -133,6 +136,20 @@ def run():
         assert nums == ["1", "0", "1"], nums           # считаются только задачи проекта
         assert page.locator(".focus").count() == 1     # фокус тоже сужен
         assert "Утренняя зарядка" in page.inner_text(".focus")
+
+        # фильтр по приоритету работает и на главной: счётчики сужаются
+        page.locator("[data-proj='']").click()
+        page.wait_for_timeout(200)
+        page.locator("[data-prio='1']").click()
+        page.wait_for_timeout(200)
+        assert page.locator(".stat .n").all_inner_texts()[:2] == ["1", "1"], \
+            page.locator(".stat .n").all_inner_texts()      # P1: сегодня 405, просрочена 313
+        # ни одна задача фокуса не P1 → секция «Фокус дня» пропадает целиком
+        assert page.locator(".focus").count() == 0
+        page.locator("[data-prio='']").click()
+        page.wait_for_timeout(200)
+        page.locator("[data-proj='21']").click()            # вернуть проектный фильтр для след. шага
+        page.wait_for_timeout(200)
 
         # фильтр сквозной: переходит на вкладку «Задачи»
         page.locator("[data-tab=list]").click()
@@ -153,7 +170,7 @@ def run():
         assert page.locator("[data-proj='none'].on").count() == 1, "фильтр не сохранился"
         page.locator("[data-proj='']").click()         # «Все» — назад к полной картине
         page.wait_for_timeout(200)
-        assert page.locator(".stat .n").all_inner_texts() == ["3", "2", "12"]
+        assert page.locator(".stat .n").all_inner_texts() == ["4", "2", "12"]
 
         # отметить главную задачу фокуса сделанной
         page.locator(".focus").first.click()
@@ -167,6 +184,32 @@ def run():
         body = page.inner_text("#app").lower()   # CSS капсит заголовки секций
         assert "просроченные" in body and "ближайшие 7 дней" in body
         assert "бэклог без даты" not in body           # задачи без даты скрыты
+
+        # ── приоритеты: чип на каждой карточке ──
+        chips = page.locator(".card .chip.p1, .card .chip.p2, .card .chip.p3").count()
+        assert chips == page.locator(".card .t-name").count(), "приоритет показан не у всех задач"
+
+        # сортировка: приоритет главнее даты (313 моложе 341, но P1)
+        names = page.locator(".t-name").all_inner_texts()
+        assert names.index("Изменить дизайн лендинга") < names.index("Прописать use cases"), names
+        # внутри «Сегодня»: P1 → P2 → P3
+        assert names.index("Срочный звонок") < names.index("Утренняя зарядка") < names.index("Проверить статистику"), names
+
+        # фильтр по приоритету
+        prio_chips = page.locator("[data-prio]").all_inner_texts()
+        assert prio_chips == ["Любой", "Высокий", "Обычный", "Низкий"], prio_chips
+        page.locator("[data-prio='3']").click()
+        page.wait_for_timeout(200)
+        names = page.locator(".t-name").all_inner_texts()
+        assert names == ["Проверить статистику"], names        # единственная P3
+
+        # приоритет и проект складываются (И), а не заменяют друг друга
+        page.locator("[data-proj='21']").click()               # «Здоровье» — там только P2
+        page.wait_for_timeout(200)
+        assert page.locator(".t-name").count() == 0, page.inner_text("#app")
+        page.locator("[data-proj='']").click(); page.wait_for_timeout(200)
+        page.locator("[data-prio='']").click(); page.wait_for_timeout(200)
+        assert page.locator(".t-name").count() > 1
 
         # перенос просроченной задачи #313 на завтра
         page.locator("[data-open-defer='313']").click()
@@ -183,6 +226,7 @@ def run():
         page.wait_for_selector("#add-name", timeout=5000)
         page.fill("#add-name", "Новая задача из теста")
         page.select_option("#add-proj", "2")
+        page.locator("[data-prio-opt='3']").click()      # новая задача — низкий приоритет
         page.locator(f"[data-due='{d(1)}']").click()
         page.click("#add-go")
         page.wait_for_timeout(300)
@@ -212,6 +256,7 @@ def run():
         page.fill("#ed-name", "Проверить статистику (ред.)")
         page.select_option("#ed-proj", "21")
         # произвольная дата через нативный date-picker
+        page.locator("[data-prio-opt='1']").click()      # приоритет: Низкий → Высокий
         page.fill("#date-custom", d(28))
         page.dispatch_event("#date-custom", "change")
         page.wait_for_timeout(100)
@@ -221,7 +266,8 @@ def run():
         page.wait_for_timeout(300)
         assert page.evaluate("window.__mb.text") == "Сохранить изменения (4)"
         edit_buf = page.evaluate("JSON.parse(localStorage.getItem('planner_pending_v1')).edit")
-        assert edit_buf == {"401": {"n": "Проверить статистику (ред.)", "p": 21, "d": d(28)}}, edit_buf
+        assert edit_buf == {"401": {"n": "Проверить статистику (ред.)", "p": 21,
+                                    "d": d(28), "pr": 1}}, edit_buf
 
         # ── удаление задачи #400: в буфер, обратимо, из счётчиков выпадает ──
         page.locator("[data-tab=dash]").click()
@@ -257,8 +303,9 @@ def run():
         batch = json.loads(sent[0])
         assert batch["done"] == [341]
         assert batch["postpone"] == {"313": d(1)}
-        assert batch["add"] == [{"n": "Новая задача из теста", "p": 2, "d": d(1)}]
-        assert batch["edit"] == {"401": {"n": "Проверить статистику (ред.)", "p": 21, "d": d(28)}}
+        assert batch["add"] == [{"n": "Новая задача из теста", "p": 2, "d": d(1), "pr": 3}]
+        assert batch["edit"] == {"401": {"n": "Проверить статистику (ред.)", "p": 21,
+                                         "d": d(28), "pr": 1}}
         assert batch["del"] == [400], batch["del"]
 
         # оптимистичный снапшот: сделанная задача удалена, перенос применён
@@ -271,6 +318,7 @@ def run():
         # правка применена к снапшоту оптимистично
         t401 = [t for t in snap["tasks"] if t["id"] == 401][0]
         assert t401["n"] == "Проверить статистику (ред.)" and t401["p"] == 21 and t401["d"] == d(28)
+        assert t401["pr"] == 1, t401
         # буфер очищен
         assert page.evaluate("localStorage.getItem('planner_pending_v1')") is None
 
