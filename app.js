@@ -40,6 +40,7 @@ const STYLE = `
   .chip.proj { background: #e8f0fe; color: #3169c6; }
   .over { color: var(--red); font-weight: 600; }
   .moved { color: var(--btn); font-weight: 600; }
+  .moved.del { color: var(--red); }
   .t-acts { flex-shrink: 0; display: flex; gap: 2px; }
   .defer { flex-shrink: 0; border: none; background: none; color: var(--hint); font-size: 19px;
     padding: 2px 4px; cursor: pointer; }
@@ -158,16 +159,33 @@ async function csGetBig(key) {
   } catch (e) { return null; }
 }
 
+// Фильтр по проекту переживает переоткрытие приложения и переключение вкладок.
+const PROJ_KEY = "planner_projfilter_v1";
+function loadProjFilter() {
+  try {
+    const v = localStorage.getItem(PROJ_KEY);
+    return v == null ? null : JSON.parse(v);
+  } catch (e) { return null; }
+}
+function setProjFilter(v) {
+  projFilter = v;
+  try {
+    if (v == null) localStorage.removeItem(PROJ_KEY);
+    else localStorage.setItem(PROJ_KEY, JSON.stringify(v));
+  } catch (e) {}
+}
+
 // ── Состояние ───────────────────────────────────────────────────────────────
 let snap = null;          // снапшот данных от бота
 let tab = "dash";         // dash | list
 let scope = "today";      // today | tomorrow | week | nextweek | overdue | doneweek
 let pending = loadPending();  // буфер несохранённых действий
 let openDefer = null;     // id задачи с раскрытым выбором переноса
+let projFilter = loadProjFilter();  // фильтр по проекту: null = все, "none" = без проекта, иначе id
 
 const PENDING_KEY = "planner_pending_v1";
 function emptyPending() {
-  return { done: [], postpone: {}, add: [], edit: {}, addProject: [] };
+  return { done: [], postpone: {}, add: [], edit: {}, del: [], addProject: [] };
 }
 function loadPending() {
   try {
@@ -186,7 +204,8 @@ function clearPending() {
 }
 function pendingCount() {
   return pending.done.length + Object.keys(pending.postpone).length +
-    pending.add.length + Object.keys(pending.edit).length + pending.addProject.length;
+    pending.add.length + Object.keys(pending.edit).length + pending.del.length +
+    pending.addProject.length;
 }
 
 // ── Даты ────────────────────────────────────────────────────────────────────
@@ -230,6 +249,7 @@ function daysOverdue(iso) {
 // ── Производные данные (снапшот + буфер поверх) ─────────────────────────────
 function effTasks() {
   const done = new Set(pending.done);
+  const del = new Set(pending.del);
   const out = snap.tasks.map(t => {
     const e = pending.edit[t.id] || {};
     return {
@@ -239,6 +259,7 @@ function effTasks() {
       // быстрый перенос (⇥) имеет приоритет над сроком из формы правки
       d: pending.postpone[t.id] || ("d" in e ? e.d : t.d),
       isDone: done.has(t.id),
+      isDel: del.has(t.id),
       isEdited: !!pending.edit[t.id]
     };
   });
@@ -251,7 +272,7 @@ function grouped() {
   const t = todayISO();
   const week = isoAddDays(t, 7);
   const g = { overdue: [], today: [], upcoming: [] };
-  effTasks().forEach(x => {
+  visTasks().forEach(x => {
     if (!x.d) return;                    // задачи без даты в списке дня не показываем
     if (x.d < t) g.overdue.push(x);
     else if (x.d === t) g.today.push(x);
@@ -267,6 +288,47 @@ function projName(pid) {
     return np ? np.n + " (новый)" : null;
   }
   return (snap.projects && snap.projects[pid]) || null;
+}
+
+// Задача проходит текущий фильтр по проекту.
+function matchProj(x) {
+  if (projFilter == null) return true;
+  if (projFilter === "none") return x.p == null;
+  return String(x.p) === String(projFilter);
+}
+// Видимые задачи = буфер поверх снапшота, суженные фильтром проекта.
+function visTasks() {
+  return effTasks().filter(matchProj);
+}
+// Чипы «Все / <проекты> / Без проекта». Проекты — только те, у которых есть
+// незакрытые задачи (+ выбранный, даже если опустел, иначе из него не выйти).
+function projChipsHtml() {
+  const keys = new Set();
+  effTasks().forEach(x => {
+    if (x.isDone || x.isDel) return;
+    keys.add(x.p == null ? "none" : String(x.p));
+  });
+  if (projFilter != null) keys.add(String(projFilter));
+  if (keys.size < 2) return "";                 // фильтровать нечего
+  const items = [...keys].filter(k => k !== "none")
+    .map(k => [k, projName(k) || "Проект #" + k])
+    .sort((a, b) => a[1].localeCompare(b[1], "ru"));
+  if (keys.has("none")) items.push(["none", "Без проекта"]);
+  const chip = (val, label, on) =>
+    `<button class="scope-chip${on ? " on" : ""}" data-proj="${val}">${esc(label)}</button>`;
+  return `<div class="scope-row">` + chip("", "Все", projFilter == null) +
+    items.map(([k, name]) => chip(k, name, String(projFilter) === k)).join("") + `</div>`;
+}
+function bindProjChips() {
+  app.querySelectorAll("[data-proj]").forEach(el => {
+    el.onclick = () => {
+      const v = el.dataset.proj;
+      setProjFilter(v === "" ? null : (v === "none" ? "none" : Number(v)));
+      openDefer = null;
+      render();
+      window.scrollTo(0, 0);
+    };
+  });
 }
 
 // ── Отрисовка ───────────────────────────────────────────────────────────────
@@ -298,6 +360,7 @@ function taskCard(x, opts) {
   if (pn) meta.push(`<span class="chip proj">${esc(pn.slice(0, 22))}</span>`);
   if (x.isNew) meta.push(`<span class="moved">новая</span>`);
   if (x.isEdited) meta.push(`<span class="moved">изменена</span>`);
+  if (x.isDel) meta.push(`<span class="moved del">удалена</span>`);
   if (pending.postpone[x.id]) meta.push(`<span class="moved">→ ${esc(fmtDay(x.d))}</span>`);
   else if (x.d && x.d < todayISO()) meta.push(`<span class="over">${daysOverdue(x.d)} дн.</span>`);
   else if (x.d && x.d > todayISO()) meta.push(`<span>${esc(fmtDay(x.d))}</span>`);
@@ -312,15 +375,21 @@ function taskCard(x, opts) {
   }
   return `<div class="card">
     <div class="task">
-      ${x.isNew ? `<div class="cb on" style="background:var(--btn);border-color:var(--btn)"></div>`
+      ${x.isDel ? `<div class="cb"></div>`
+        : x.isNew ? `<div class="cb on" style="background:var(--btn);border-color:var(--btn)"></div>`
         : `<div class="cb${x.isDone ? " on" : ""}" data-toggle="${x.id}"></div>`}
       <div class="t-body">
-        <div class="t-name${x.isDone ? " done" : ""}">${esc(x.n)}</div>
+        <div class="t-name${x.isDone || x.isDel ? " done" : ""}">${esc(x.n)}</div>
         <div class="t-meta">${meta.join("")}</div>
       </div>
-      ${!x.isNew && !x.isDone ? `<div class="t-acts">
+      ${x.isDel ? `<div class="t-acts">
+        <button class="defer" data-undel="${x.id}">↩</button>
+      </div>` : x.isNew ? `<div class="t-acts">
+        <button class="defer" data-del-new="${x.id}">🗑</button>
+      </div>` : !x.isDone ? `<div class="t-acts">
         <button class="defer" data-edit="${x.id}">✎</button>
         ${withDefer ? `<button class="defer" data-open-defer="${x.id}">⇥</button>` : ""}
+        <button class="defer" data-del="${x.id}">🗑</button>
       </div>` : ""}
     </div>${deferHtml}</div>`;
 }
@@ -329,13 +398,19 @@ function renderDash() {
   const g = grouped();
   const doneToday = g.today.filter(x => x.isDone).length + snap.tasks.filter(t => t.doneToday).length;
   const focusIds = snap.focus || [];
-  const all = effTasks();
-  const focusTasks = focusIds.map(id => all.find(x => x.id === id)).filter(Boolean);
+  const all = visTasks();
+  const focusTasks = focusIds.map(id => all.find(x => x.id === id))
+    .filter(Boolean).filter(x => !x.isDel);
+  // при активном фильтре «за неделю ✓» считаем по списку выполненного, а не по общему счётчику
+  const doneWeek = projFilter == null
+    ? ((snap.stats && snap.stats.done_week) || 0)
+    : (snap.done_week_tasks || []).filter(matchProj).length;
   let html = header("Планировщик");
+  html += projChipsHtml();
   html += `<div class="stats">
-    <div class="stat" data-scope="today"><div class="n blue">${g.today.filter(x => !x.isDone).length}</div><div class="l">сегодня</div></div>
-    <div class="stat" data-scope="overdue"><div class="n red">${g.overdue.filter(x => !x.isDone).length}</div><div class="l">просрочено</div></div>
-    <div class="stat" data-scope="doneweek"><div class="n green">${(snap.stats && snap.stats.done_week) || 0}</div><div class="l">за неделю ✓</div></div>
+    <div class="stat" data-scope="today"><div class="n blue">${g.today.filter(x => !x.isDone && !x.isDel).length}</div><div class="l">сегодня</div></div>
+    <div class="stat" data-scope="overdue"><div class="n red">${g.overdue.filter(x => !x.isDone && !x.isDel).length}</div><div class="l">просрочено</div></div>
+    <div class="stat" data-scope="doneweek"><div class="n green">${doneWeek}</div><div class="l">за неделю ✓</div></div>
   </div>`;
   if (focusTasks.length) {
     html += `<div class="sec"><span>Фокус дня</span></div>`;
@@ -354,7 +429,7 @@ function renderDash() {
     <div class="qa-row">
       <button class="qa" id="qa-add"><span class="ic">＋</span>Задача</button>
       <button class="qa" id="qa-add-proj"><span class="ic">📁</span>Проект</button>
-      <button class="qa" id="qa-overdue"><span class="ic">📥</span>Просрочка (${g.overdue.filter(x => !x.isDone).length})</button>
+      <button class="qa" id="qa-overdue"><span class="ic">📥</span>Просрочка (${g.overdue.filter(x => !x.isDone && !x.isDel).length})</button>
     </div>`;
   const r = snap.rituals || {};
   html += `<div class="sec"><span>Ритуалы</span></div>
@@ -376,6 +451,7 @@ function renderDash() {
   app.querySelectorAll("[data-focus]").forEach(el => {
     el.onclick = () => toggleDone(el.dataset.focus);
   });
+  bindProjChips();
 }
 
 const SCOPES = [
@@ -393,7 +469,7 @@ function scopeChipsHtml() {
 }
 // Активные задачи в диапазоне дат [from, to] включительно, сгруппированные по дню.
 function rangeGroupedHtml(from, to) {
-  const items = effTasks().filter(x => x.d && x.d >= from && x.d <= to && !x.isDone)
+  const items = visTasks().filter(x => x.d && x.d >= from && x.d <= to && !x.isDone && !x.isDel)
     .sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : a.pr - b.pr));
   if (!items.length) return `<div class="empty">Задач нет 🎉</div>`;
   let html = "", curDay = null;
@@ -406,7 +482,7 @@ function rangeGroupedHtml(from, to) {
 // Просроченные (срок < сегодня, не выполнены), отсортированные.
 function overdueItems() {
   const t = todayISO();
-  return effTasks().filter(x => x.d && x.d < t && !x.isDone)
+  return visTasks().filter(x => x.d && x.d < t && !x.isDone && !x.isDel)
     .sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : a.pr - b.pr));
 }
 // Секция «Просроченные» с карточками (пусто, если просрочек нет).
@@ -428,6 +504,7 @@ function doneCard(t) {
 }
 function renderList() {
   let html = header(scopeTitle());
+  html += projChipsHtml();
   html += scopeChipsHtml();
   if (scope === "today") {
     const g = grouped();
@@ -451,7 +528,7 @@ function renderList() {
     const [, sun] = weekBounds(t, 0);
     const od = overdueSectionHtml();
     html += od;
-    const hasRange = effTasks().some(x => x.d && x.d >= t && x.d <= sun && !x.isDone);
+    const hasRange = visTasks().some(x => x.d && x.d >= t && x.d <= sun && !x.isDone && !x.isDel);
     if (hasRange) html += rangeGroupedHtml(t, sun);
     else if (!od) html += `<div class="empty">На этой неделе задач нет 🎉</div>`;
   } else if (scope === "nextweek") {
@@ -462,7 +539,7 @@ function renderList() {
     if (!od.length) html += `<div class="empty">Просроченных нет 🎉</div>`;
     else od.forEach(x => { html += taskCard(x, { defer: true }); });
   } else if (scope === "doneweek") {
-    const done = (snap.done_week_tasks || []).slice()
+    const done = (snap.done_week_tasks || []).filter(matchProj)
       .sort((a, b) => ((a.cd || a.d || "") < (b.cd || b.d || "") ? 1 : -1));
     if (!done.length) html += `<div class="empty">За неделю ничего не выполнено</div>`;
     else done.forEach(t => { html += doneCard(t); });
@@ -471,6 +548,7 @@ function renderList() {
   app.querySelectorAll(".scope-chip[data-scope]").forEach(el => {
     el.onclick = () => { scope = el.dataset.scope; openDefer = null; render(); window.scrollTo(0, 0); };
   });
+  bindProjChips();
   bindTaskHandlers();
 }
 
@@ -488,6 +566,21 @@ function bindTaskHandlers() {
   app.querySelectorAll("[data-edit]").forEach(el => {
     el.onclick = () => renderEditForm(Number(el.dataset.edit));
   });
+  app.querySelectorAll("[data-del]").forEach(el => {
+    el.onclick = () => toggleDel(el.dataset.del);
+  });
+  app.querySelectorAll("[data-undel]").forEach(el => {
+    el.onclick = () => toggleDel(el.dataset.undel);
+  });
+  // несохранённая задача из буфера удаляется сразу — в БД её ещё нет
+  app.querySelectorAll("[data-del-new]").forEach(el => {
+    el.onclick = () => {
+      pending.add.splice(Number(String(el.dataset.delNew).slice(3)), 1);
+      savePending();
+      tg.HapticFeedback.impactOccurred("light");
+      render();
+    };
+  });
   app.querySelectorAll("[data-defer]").forEach(el => {
     el.onclick = () => {
       const id = Number(el.dataset.defer);
@@ -500,6 +593,22 @@ function bindTaskHandlers() {
       render();
     };
   });
+}
+
+// Удаление = архивирование на стороне бота. До «Сохранить» обратимо кнопкой ↩.
+function toggleDel(id) {
+  id = Number(id);
+  const i = pending.del.indexOf(id);
+  if (i >= 0) {
+    pending.del.splice(i, 1);
+  } else {
+    pending.del.push(id);
+    const j = pending.done.indexOf(id);   // удалённая не может быть ещё и «сделана»
+    if (j >= 0) pending.done.splice(j, 1);
+  }
+  savePending();
+  tg.HapticFeedback.impactOccurred("medium");
+  render();
 }
 
 function toggleDone(id) {
@@ -702,7 +811,8 @@ mb.onClick(async () => {
   // оптимистично применяем буфер к локальному снапшоту — чтобы после
   // переоткрытия приложение показывало актуальное без синка
   const doneSet = new Set(pending.done);
-  snap.tasks = snap.tasks.filter(t => !doneSet.has(t.id));
+  const delSet = new Set(pending.del);
+  snap.tasks = snap.tasks.filter(t => !doneSet.has(t.id) && !delSet.has(t.id));
   snap.tasks.forEach(t => {
     const e = pending.edit[t.id];
     if (e) {
@@ -718,7 +828,8 @@ mb.onClick(async () => {
   await csSetBig("snap", snap);
   const payload = JSON.stringify({
     v: 1, done: pending.done, postpone: pending.postpone,
-    add: pending.add, edit: pending.edit, addProject: pending.addProject
+    add: pending.add, edit: pending.edit, del: pending.del,
+    addProject: pending.addProject
   });
   clearPending();
   tg.HapticFeedback.notificationOccurred("success");
