@@ -56,6 +56,7 @@ SNAPSHOT = {
         {"id": 405, "n": "Срочный звонок", "p": 2, "pr": 1, "d": d(0)},
         {"id": 402, "n": "Подготовить отчёт", "p": 2, "pr": 2, "d": d(2)},
         {"id": 403, "n": "Бэклог без даты", "p": 2, "pr": 2, "d": None},
+        {"id": 406, "n": "Идея без срока", "p": None, "pr": 1, "d": None},
         {"id": 404, "n": "Личное дело", "p": None, "pr": 2, "d": d(0)},
     ],
     "focus": [341, 400, 401],
@@ -202,6 +203,18 @@ def run():
         page.wait_for_timeout(200)
         names = page.locator(".t-name").all_inner_texts()
         assert names == ["Проверить статистику"], names        # единственная P3
+
+        # ── скоуп «Без даты»: единственное место, где видны задачи без срока ──
+        page.locator("[data-prio='']").click()
+        page.wait_for_timeout(200)
+        page.locator(".scope-chip[data-scope=nodate]").click()
+        page.wait_for_timeout(200)
+        names = page.locator(".t-name").all_inner_texts()
+        assert names == ["Идея без срока", "Бэклог без даты"], names   # P1 выше P2
+        page.locator(".scope-chip[data-scope=today]").click()
+        page.wait_for_timeout(200)
+        page.locator("[data-prio='3']").click()
+        page.wait_for_timeout(200)
 
         # приоритет и проект складываются (И), а не заменяют друг друга
         page.locator("[data-proj='21']").click()               # «Здоровье» — там только P2

@@ -388,6 +388,17 @@ function render() {
   else renderList();
   renderTabbar();
   updateMainButton();
+  revealActiveChips();
+}
+// Ряды чипов прокручиваются по горизонтали: выбранный может оказаться за
+// правым краем, и тогда непонятно, какой фильтр включён. Подтягиваем в вид.
+function revealActiveChips() {
+  app.querySelectorAll(".scope-row").forEach(row => {
+    const on = row.querySelector(".scope-chip.on");
+    if (on && on.offsetLeft + on.offsetWidth > row.clientWidth) {
+      row.scrollLeft = Math.max(0, on.offsetLeft - 12);
+    }
+  });
 }
 
 function header(title) {
@@ -510,11 +521,12 @@ function renderDash() {
 const SCOPES = [
   ["today", "Сегодня"], ["tomorrow", "Завтра"],
   ["week", "Эта неделя"], ["nextweek", "След. неделя"],
-  ["overdue", "Просрочка"], ["doneweek", "Готово ✓"],
+  ["overdue", "Просрочка"], ["nodate", "Без даты"], ["doneweek", "Готово ✓"],
 ];
 function scopeTitle() {
   return ({ today: "Сегодня", tomorrow: "Завтра", week: "Эта неделя",
-    nextweek: "Следующая неделя", overdue: "Просроченные", doneweek: "Сделано за неделю" })[scope] || "Задачи";
+    nextweek: "Следующая неделя", overdue: "Просроченные", nodate: "Без срока",
+    doneweek: "Сделано за неделю" })[scope] || "Задачи";
 }
 function scopeChipsHtml() {
   return `<div class="scope-row">` + SCOPES.map(([s, l]) =>
@@ -592,6 +604,11 @@ function renderList() {
     const od = overdueItems();
     if (!od.length) html += `<div class="empty">Просроченных нет 🎉</div>`;
     else od.forEach(x => { html += taskCard(x, { defer: true }); });
+  } else if (scope === "nodate") {
+    // задачи без срока — их не видно ни в одном дневном списке
+    const items = visTasks().filter(x => !x.d && !x.isDone && !x.isDel).sort(byPrioDate);
+    if (!items.length) html += `<div class="empty">Задач без срока нет</div>`;
+    else items.forEach(x => { html += taskCard(x, { defer: true }); });
   } else if (scope === "doneweek") {
     const done = (snap.done_week_tasks || []).filter(matchProj)
       .sort((a, b) => ((a.cd || a.d || "") < (b.cd || b.d || "") ? 1 : -1));
