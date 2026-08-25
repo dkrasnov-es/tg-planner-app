@@ -62,8 +62,8 @@ SNAPSHOT = {
     "focus": [341, 400, 401],
     "stats": {"done_week": 12},
     "done_week_tasks": [
-        {"id": 500, "n": "Сделано в Базе", "p": 2, "d": d(-2), "cd": d(-2)},
-        {"id": 501, "n": "Сделано в Здоровье", "p": 21, "d": d(-3), "cd": d(-3)},
+        {"id": 500, "n": "Сделано в Базе", "p": 2, "pr": 1, "d": d(-2), "cd": d(-2)},
+        {"id": 501, "n": "Сделано в Здоровье", "p": 21, "pr": 3, "d": d(-3), "cd": d(-3)},
     ],
     "rituals": {"morning": True, "evening": False, "responded": False},
 }
@@ -126,7 +126,9 @@ def run():
         nums = page.locator(".stat .n").all_inner_texts()
         assert nums == ["4", "2", "2", "12"], nums     # сегодня(4) просрочено(2) без срока(2) неделя(12)
         assert page.locator(".focus").count() == 3
-        assert "Прописать use cases" in page.inner_text(".focus")
+        focus = "\n".join(page.locator(".focus").all_inner_texts())
+        for name in ("Прописать use cases", "Утренняя зарядка", "Проверить статистику"):
+            assert name in focus, focus          # все три из snapshot.focus, а не только первая
 
         # ── фильтр по проектам: чипы на дашборде ──
         chips = page.locator("[data-proj]").all_inner_texts()
@@ -151,6 +153,17 @@ def run():
         for name in ("Изменить дизайн лендинга", "Срочный звонок", "Идея без срока"):
             assert name in focus, focus
         assert "Прописать use cases" not in focus, focus      # P2 под фильтром P1 не показываем
+        # «за неделю ✓» тоже сужается приоритетом: из двух выполненных P1 только 500
+        assert page.locator(".stat .n").all_inner_texts()[3] == "1", \
+            page.locator(".stat .n").all_inner_texts()
+        page.locator(".stat[data-scope=doneweek]").click()
+        page.wait_for_timeout(200)
+        body = page.inner_text("#app")
+        assert "Сделано в Базе" in body and "Сделано в Здоровье" not in body, body
+        page.locator(".scope-chip[data-scope='today']").click()   # вернуть скоуп для след. шагов
+        page.wait_for_timeout(200)
+        page.locator("[data-tab=dash]").click()
+        page.wait_for_timeout(200)
         page.locator("[data-prio='']").click()
         page.wait_for_timeout(200)
 

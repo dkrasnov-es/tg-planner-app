@@ -332,6 +332,12 @@ function matchProj(x) {
 function visTasks() {
   return effTasks().filter(matchProj).filter(x => prioFilter == null || prio(x) === prioFilter);
 }
+// Выполненное за неделю под текущими фильтрами. В снапшотах старых версий
+// у этих задач нет pr — prio() считает их обычными (P2).
+function doneWeekTasks() {
+  return (snap.done_week_tasks || []).filter(matchProj)
+    .filter(x => prioFilter == null || prio(x) === prioFilter);
+}
 // Чипы «Все / <проекты> / Без проекта». Проекты — только те, у которых есть
 // незакрытые задачи (+ выбранный, даже если опустел, иначе из него не выйти).
 function projChipsHtml() {
@@ -470,9 +476,9 @@ function renderDash() {
     : focusIds.map(id => all.find(x => x.id === id))
         .filter(Boolean).filter(x => !x.isDel);
   // при активном фильтре «за неделю ✓» считаем по списку выполненного, а не по общему счётчику
-  const doneWeek = projFilter == null
+  const doneWeek = !filtered
     ? ((snap.stats && snap.stats.done_week) || 0)
-    : (snap.done_week_tasks || []).filter(matchProj).length;
+    : doneWeekTasks().length;
   let html = header("Планировщик");
   html += projChipsHtml();
   html += prioChipsHtml();
@@ -621,7 +627,7 @@ function renderList() {
     if (!items.length) html += `<div class="empty">Задач без срока нет</div>`;
     else items.forEach(x => { html += taskCard(x, { defer: true }); });
   } else if (scope === "doneweek") {
-    const done = (snap.done_week_tasks || []).filter(matchProj)
+    const done = doneWeekTasks()
       .sort((a, b) => ((a.cd || a.d || "") < (b.cd || b.d || "") ? 1 : -1));
     if (!done.length) html += `<div class="empty">За неделю ничего не выполнено</div>`;
     else done.forEach(t => { html += doneCard(t); });
