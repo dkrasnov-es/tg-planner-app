@@ -145,9 +145,27 @@ def run():
         page.wait_for_timeout(200)
         assert page.locator(".stat .n").all_inner_texts()[:2] == ["1", "1"], \
             page.locator(".stat .n").all_inner_texts()      # P1: сегодня 405, просрочена 313
-        # ни одна задача фокуса не P1 → секция «Фокус дня» пропадает целиком
-        assert page.locator(".focus").count() == 0
+        # фокус пересчитан по фильтру, а не пересечён с тройкой бота (иначе было бы 0)
+        assert page.locator(".focus").count() == 3
+        focus = "\n".join(page.locator(".focus").all_inner_texts())   # inner_text даёт только первую карточку
+        for name in ("Изменить дизайн лендинга", "Срочный звонок", "Идея без срока"):
+            assert name in focus, focus
+        assert "Прописать use cases" not in focus, focus      # P2 под фильтром P1 не показываем
         page.locator("[data-prio='']").click()
+        page.wait_for_timeout(200)
+
+        # проект без единой задачи из фокуса бота: карточки всё равно есть
+        page.locator("[data-proj='none']").click()            # «Без проекта»: 404, 406
+        page.wait_for_timeout(200)
+        assert page.locator(".focus").count() == 2, page.inner_text("#app")
+        # пустая выборка: вместо молчаливой пустоты — надпись
+        page.locator("[data-prio='3']").click()               # среди «без проекта» нет P3
+        page.wait_for_timeout(200)
+        assert page.locator(".focus").count() == 0
+        assert "Нет задач под этим фильтром" in page.inner_text("#app")
+        page.locator("[data-prio='']").click()
+        page.wait_for_timeout(200)
+        page.locator("[data-proj='']").click()
         page.wait_for_timeout(200)
         page.locator("[data-proj='21']").click()            # вернуть проектный фильтр для след. шага
         page.wait_for_timeout(200)

@@ -461,8 +461,14 @@ function renderDash() {
   const doneToday = g.today.filter(x => x.isDone).length + snap.tasks.filter(t => t.doneToday).length;
   const focusIds = snap.focus || [];
   const all = visTasks();
-  const focusTasks = focusIds.map(id => all.find(x => x.id === id))
-    .filter(Boolean).filter(x => !x.isDel);
+  const filtered = projFilter != null || prioFilter != null;
+  // Тройка от бота посчитана по всем задачам: при фильтре пересечение с ней
+  // почти всегда пустое, и главная остаётся вовсе без задач. Под фильтром
+  // считаем фокус заново — топ-3 отфильтрованных по приоритету, затем дате.
+  const focusTasks = filtered
+    ? all.filter(x => !x.isDel).sort(byPrioDate).slice(0, 3)
+    : focusIds.map(id => all.find(x => x.id === id))
+        .filter(Boolean).filter(x => !x.isDel);
   // при активном фильтре «за неделю ✓» считаем по списку выполненного, а не по общему счётчику
   const doneWeek = projFilter == null
     ? ((snap.stats && snap.stats.done_week) || 0)
@@ -488,6 +494,10 @@ function renderDash() {
         <div class="fp">${esc(sub)}</div>
       </div>`;
     });
+  } else if (filtered) {
+    html += `<div class="sec"><span>Фокус дня</span></div>
+      <div class="card"><div class="t-body">
+        <div class="t-meta">Нет задач под этим фильтром</div></div></div>`;
   }
   html += `<div class="sec"><span>Быстрые действия</span></div>
     <div class="qa-row">
