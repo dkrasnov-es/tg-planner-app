@@ -124,7 +124,7 @@ def run():
         stats = page.inner_text(".stats")
         assert "12" in stats, stats                    # done_week
         nums = page.locator(".stat .n").all_inner_texts()
-        assert nums == ["4", "2", "12"], nums          # сегодня(4) просрочено(2) неделя(12)
+        assert nums == ["4", "2", "2", "12"], nums     # сегодня(4) просрочено(2) без срока(2) неделя(12)
         assert page.locator(".focus").count() == 3
         assert "Прописать use cases" in page.inner_text(".focus")
 
@@ -134,7 +134,7 @@ def run():
         page.locator("[data-proj='21']").click()       # проект «Здоровье»
         page.wait_for_timeout(200)
         nums = page.locator(".stat .n").all_inner_texts()
-        assert nums == ["1", "0", "1"], nums           # считаются только задачи проекта
+        assert nums == ["1", "0", "0", "1"], nums      # считаются только задачи проекта
         assert page.locator(".focus").count() == 1     # фокус тоже сужен
         assert "Утренняя зарядка" in page.inner_text(".focus")
 
@@ -171,7 +171,7 @@ def run():
         assert page.locator("[data-proj='none'].on").count() == 1, "фильтр не сохранился"
         page.locator("[data-proj='']").click()         # «Все» — назад к полной картине
         page.wait_for_timeout(200)
-        assert page.locator(".stat .n").all_inner_texts() == ["4", "2", "12"]
+        assert page.locator(".stat .n").all_inner_texts() == ["4", "2", "2", "12"]
 
         # отметить главную задачу фокуса сделанной
         page.locator(".focus").first.click()
@@ -205,6 +205,13 @@ def run():
         assert names == ["Проверить статистику"], names        # единственная P3
 
         # ── скоуп «Без даты»: единственное место, где видны задачи без срока ──
+        # плитка «без срока» на главной ведёт в новый вид
+        page.locator("[data-tab=dash]").click()
+        page.wait_for_timeout(200)
+        page.locator(".stat[data-scope=nodate]").click()
+        page.wait_for_timeout(300)
+        assert "Без срока" in page.inner_text(".hdr"), page.inner_text(".hdr")
+
         page.locator("[data-prio='']").click()
         page.wait_for_timeout(200)
         page.locator(".scope-chip[data-scope=nodate]").click()

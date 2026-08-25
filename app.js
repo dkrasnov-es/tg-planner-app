@@ -50,9 +50,9 @@ const STYLE = `
   .defer-opt { flex: 1; border: none; border-radius: 9px; background: var(--bg); color: var(--text);
     font-size: 12.5px; font-weight: 600; padding: 8px 2px; cursor: pointer; }
   .stats { display: flex; gap: 8px; margin: 4px 12px 6px; }
-  .stat { flex: 1; background: var(--card); border-radius: 13px; padding: 11px 6px; text-align: center; cursor: pointer; }
+  .stat { flex: 1; min-width: 0; background: var(--card); border-radius: 13px; padding: 11px 3px; text-align: center; cursor: pointer; }
   .stat:active { opacity: .6; }
-  .stat .n { font-size: 23px; font-weight: 800; }
+  .stat .n { font-size: 22px; font-weight: 800; }
   .stat .l { font-size: 10.5px; color: var(--hint); margin-top: 1px; }
   .scope-row { display: flex; gap: 6px; overflow-x: auto; padding: 2px 12px 8px; -webkit-overflow-scrolling: touch; }
   .scope-row::-webkit-scrollbar { display: none; }
@@ -473,6 +473,7 @@ function renderDash() {
   html += `<div class="stats">
     <div class="stat" data-scope="today"><div class="n blue">${g.today.filter(x => !x.isDone && !x.isDel).length}</div><div class="l">сегодня</div></div>
     <div class="stat" data-scope="overdue"><div class="n red">${g.overdue.filter(x => !x.isDone && !x.isDel).length}</div><div class="l">просрочено</div></div>
+    <div class="stat" data-scope="nodate"><div class="n">${visTasks().filter(x => !x.d && !x.isDone && !x.isDel).length}</div><div class="l">без срока</div></div>
     <div class="stat" data-scope="doneweek"><div class="n green">${doneWeek}</div><div class="l">за неделю ✓</div></div>
   </div>`;
   if (focusTasks.length) {
