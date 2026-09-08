@@ -52,7 +52,8 @@ SNAPSHOT = {
         {"id": 341, "n": "Прописать use cases", "p": 2, "pr": 2, "d": d(-38)},
         {"id": 313, "n": "Изменить дизайн лендинга", "p": 2, "pr": 1, "d": d(-37)},
         {"id": 400, "n": "Утренняя зарядка", "p": 21, "pr": 2, "d": d(0)},
-        {"id": 401, "n": "Проверить статистику", "p": 2, "pr": 3, "d": d(0)},
+        {"id": 401, "n": "Проверить статистику", "p": 2, "pr": 3, "d": d(0),
+         "cc": 1, "c": [{"x": "Уточнить цифры", "at": "2026-09-07 12:00:00"}]},
         {"id": 405, "n": "Срочный звонок", "p": 2, "pr": 1, "d": d(0)},
         {"id": 402, "n": "Подготовить отчёт", "p": 2, "pr": 2, "d": d(2)},
         {"id": 403, "n": "Бэклог без даты", "p": 2, "pr": 2, "d": None},
@@ -298,13 +299,16 @@ def run():
         assert "Лишняя задача" not in page.inner_text("#app")
         assert page.evaluate("window.__mb.text") == "Сохранить изменения (3)"
 
-        # ── редактирование задачи #401 (имя + проект + срок на +7) ──
+        # ── редактирование задачи #401 (поля задачи + новый комментарий) ──
         page.locator("[data-tab=list]").click()
         page.wait_for_timeout(200)
         page.locator("[data-edit='401']").click()
         page.wait_for_selector("#ed-name", timeout=5000)
         assert page.input_value("#ed-name") == "Проверить статистику"   # префилл
+        assert "Уточнить цифры" in page.inner_text(".comment-list")
+        assert page.locator("#ed-comment").count() == 1
         page.fill("#ed-name", "Проверить статистику (ред.)")
+        page.fill("#ed-comment", "Зафиксировать итог")
         page.select_option("#ed-proj", "21")
         # произвольная дата через нативный date-picker
         page.locator("[data-prio-opt='1']").click()      # приоритет: Низкий → Высокий
@@ -318,7 +322,8 @@ def run():
         assert page.evaluate("window.__mb.text") == "Сохранить изменения (4)"
         edit_buf = page.evaluate("JSON.parse(localStorage.getItem('planner_pending_v1')).edit")
         assert edit_buf == {"401": {"n": "Проверить статистику (ред.)", "p": 21,
-                                    "d": d(28), "pr": 1}}, edit_buf
+                                    "d": d(28), "pr": 1,
+                                    "cm": "Зафиксировать итог"}}, edit_buf
 
         # ── удаление задачи #400: в буфер, обратимо, из счётчиков выпадает ──
         page.locator("[data-tab=dash]").click()
@@ -356,7 +361,8 @@ def run():
         assert batch["postpone"] == {"313": d(1)}
         assert batch["add"] == [{"n": "Новая задача из теста", "p": 2, "d": d(1), "pr": 3}]
         assert batch["edit"] == {"401": {"n": "Проверить статистику (ред.)", "p": 21,
-                                         "d": d(28), "pr": 1}}
+                                         "d": d(28), "pr": 1,
+                                         "cm": "Зафиксировать итог"}}
         assert batch["del"] == [400], batch["del"]
 
         # оптимистичный снапшот: сделанная задача удалена, перенос применён
@@ -370,6 +376,7 @@ def run():
         t401 = [t for t in snap["tasks"] if t["id"] == 401][0]
         assert t401["n"] == "Проверить статистику (ред.)" and t401["p"] == 21 and t401["d"] == d(28)
         assert t401["pr"] == 1, t401
+        assert t401["cc"] == 2 and t401["c"][-1]["x"] == "Зафиксировать итог", t401
         # буфер очищен
         assert page.evaluate("localStorage.getItem('planner_pending_v1')") is None
 

@@ -83,10 +83,16 @@ const STYLE = `
   .empty { text-align: center; color: var(--hint); padding: 40px 30px; font-size: 15px; }
   .form-label { font-size: 12.5px; font-weight: 700; color: var(--hint); margin: 14px 16px 6px;
     text-transform: uppercase; letter-spacing: .05em; }
-  input[type=text], input[type=date], select { width: calc(100% - 24px); margin: 0 12px; padding: 12px 14px;
+  input[type=text], input[type=date], select, textarea { width: calc(100% - 24px); margin: 0 12px; padding: 12px 14px;
     font-size: 16px; font-family: inherit; border: 1.5px solid transparent; border-radius: 12px;
     background: var(--card); color: var(--text); outline: none; }
-  input[type=text]:focus, input[type=date]:focus { border-color: var(--btn); }
+  input[type=text]:focus, input[type=date]:focus, textarea:focus { border-color: var(--btn); }
+  textarea { min-height: 96px; resize: vertical; line-height: 1.4; }
+  .comment-list { margin: 0 12px; background: var(--card); border-radius: 12px; overflow: hidden; }
+  .comment-item { padding: 10px 13px; border-bottom: .5px solid var(--bg); font-size: 14px;
+    white-space: pre-wrap; overflow-wrap: anywhere; }
+  .comment-item:last-child { border-bottom: none; }
+  .comment-time { display: block; color: var(--hint); font-size: 11px; margin-bottom: 3px; }
   input[type=date] { -webkit-appearance: none; appearance: none; }
   .date-custom { margin: 7px 12px 0; }
   .date-custom.on input[type=date] { border-color: var(--btn); }
@@ -860,7 +866,8 @@ let editPrio = 2;
 function renderEditForm(id) {
   const orig = snap.tasks.find(t => t.id === id);
   if (!orig) { render(); return; }
-  const cur = Object.assign({}, orig, pending.edit[id] || {});  // эффективные значения
+  const pendingEdit = pending.edit[id] || {};
+  const cur = Object.assign({}, orig, pendingEdit);  // эффективные значения
   editDue = cur.d || null;
   editPrio = prio(cur);
   tg.BackButton.show();
@@ -876,6 +883,11 @@ function renderEditForm(id) {
     ${prioSectionHtml(editPrio)}
     <div class="form-label">Срок</div>
     ${dateSectionHtml(editDue)}
+    ${(orig.c || []).length ? `<div class="form-label">Комментарии (${orig.cc || orig.c.length})</div>
+      <div class="comment-list">${orig.c.map(c => `<div class="comment-item">
+        <span class="comment-time">${esc(c.at || "")}</span>${esc(c.x)}</div>`).join("")}</div>` : ""}
+    <div class="form-label">Новый комментарий</div>
+    <textarea id="ed-comment" placeholder="Напишите комментарий к задаче">${esc(pendingEdit.cm || "")}</textarea>
     <button class="prim-btn" id="ed-go">Сохранить в буфер</button>`;
   wireDateSection(v => { editDue = v; });
   wirePrioSection(v => { editPrio = v; });
@@ -888,6 +900,8 @@ function renderEditForm(id) {
     if (newP !== (orig.p == null ? null : Number(orig.p))) changes.p = newP;
     if ((editDue || null) !== (orig.d || null)) changes.d = editDue || null;
     if (editPrio !== prio(orig)) changes.pr = editPrio;
+    const comment = document.getElementById("ed-comment").value.trim();
+    if (comment) changes.cm = comment;
     if (Object.keys(changes).length) pending.edit[id] = changes;
     else delete pending.edit[id];
     savePending();
@@ -934,6 +948,10 @@ mb.onClick(async () => {
       if ("p" in e) t.p = e.p;
       if ("d" in e) t.d = e.d;
       if ("pr" in e) t.pr = e.pr;
+      if (e.cm) {
+        t.c = (t.c || []).concat([{ x: e.cm, at: new Date().toISOString().slice(0, 16) }]).slice(-10);
+        t.cc = (t.cc || 0) + 1;
+      }
     }
     if (pending.postpone[t.id]) t.d = pending.postpone[t.id];
     // временные проекты ("new:i") реальный id получат после синка от бота
