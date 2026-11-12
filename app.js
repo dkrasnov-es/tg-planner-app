@@ -1,7 +1,14 @@
-// Планировщик — Telegram Mini App поверх tg_planner v1.
+// Shared Mini App runtime. Each bot pins its own immutable release and configuration.
 // Данные: снапшот из CloudStorage (ключ "snap"), обновляется inline-кнопкой
 // «Синхронизировать» от бота (payload в location.hash). Действия копятся в
 // буфер (localStorage) и уходят батчем через sendData из reply-кнопки.
+
+const CONFIG = Object.freeze({ instance: "v1", title: "Планировщик", ...(window.PLANNER_CONFIG || {}) });
+if (!["v1", "v2"].includes(CONFIG.instance)) throw new Error("Unknown planner instance");
+const storageKey = name => `planner_${name}_${CONFIG.instance}`;
+// v1 retains its existing cache; v2 has separate browser and Telegram storage.
+const cloudKey = key => CONFIG.instance === "v1" ? key : `${CONFIG.instance}_${key}`;
+const PENDING_KEY = storageKey("pending");
 
 const STYLE = `
   :root {
@@ -69,6 +76,12 @@ const STYLE = `
   .focus.mini { background: var(--card); color: var(--text); }
   .focus.mini .fl, .focus.mini .fp { color: var(--hint); opacity: 1; }
   .focus.done-card { opacity: .55; }
+  .focus-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .focus-action { min-height: 44px; padding: 8px 12px; border: 1px solid currentColor;
+    border-radius: 9px; background: transparent; color: inherit; font: inherit;
+    font-size: 13px; cursor: pointer; }
+  .focus.mini .focus-action { color: var(--btn); }
+  .focus-action:focus-visible { outline: 3px solid currentColor; outline-offset: 2px; }
   .qa-row { display: flex; gap: 8px; margin: 4px 12px 8px; }
   .qa { flex: 1; background: var(--card); border: none; border-radius: 12px; padding: 11px 4px;
     text-align: center; font-size: 12px; font-weight: 600; color: var(--btn); cursor: pointer; }
@@ -123,13 +136,13 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 function csGet(key) {
-  return new Promise(res => { if (!CS) return res(null); CS.getItem(key, (e, v) => res(e ? null : v)); });
+  return new Promise(res => { if (!CS) return res(null); CS.getItem(cloudKey(key), (e, v) => res(e ? null : v)); });
 }
 function csSet(key, val) {
-  return new Promise(res => { if (!CS) return res(false); CS.setItem(key, val, (e, ok) => res(!e && ok)); });
+  return new Promise(res => { if (!CS) return res(false); CS.setItem(cloudKey(key), val, (e, ok) => res(!e && ok)); });
 }
 function csRemove(key) {
-  return new Promise(res => { if (!CS) return res(false); CS.removeItem(key, (e, ok) => res(!e && ok)); });
+  return new Promise(res => { if (!CS) return res(false); CS.removeItem(cloudKey(key), (e, ok) => res(!e && ok)); });
 }
 function b64urlToBytes(s) {
   s = String(s).replace(/-/g, "+").replace(/_/g, "/");
@@ -183,7 +196,7 @@ function byPrioDate(a, b) {
 }
 
 // Фильтр по проекту переживает переоткрытие приложения и переключение вкладок.
-const PROJ_KEY = "planner_projfilter_v1";
+const PROJ_KEY = storageKey("projfilter");
 function loadProjFilter() {
   try {
     const v = localStorage.getItem(PROJ_KEY);
@@ -197,7 +210,7 @@ function setProjFilter(v) {
     else localStorage.setItem(PROJ_KEY, JSON.stringify(v));
   } catch (e) {}
 }
-const PRIO_KEY = "planner_priofilter_v1";
+const PRIO_KEY = storageKey("priofilter");
 function loadPrioFilter() {
   try {
     const v = localStorage.getItem(PRIO_KEY);
@@ -221,7 +234,7 @@ let openDefer = null;     // id задачи с раскрытым выборо�
 let projFilter = loadProjFilter();  // фильтр по проекту: null = все, "none" = без проекта, иначе id
 let prioFilter = loadPrioFilter();  // фильтр по приоритету: null = любой, иначе 1|2|3
 
-const PENDING_KEY = "planner_pending_v1";
+
 function emptyPending() {
   return { done: [], postpone: {}, add: [], edit: {}, del: [], addProject: [] };
 }
@@ -468,24 +481,40 @@ function taskCard(x, opts) {
     </div>${deferHtml}</div>`;
 }
 
+// Same eligibility and score as the bot's compute_focus_today / _score_top3.
+function focusEligible(x) {
+  return !x.isDel && !x.doneToday && (x.d === todayISO() || Number(x.pr) === 1 || (x.d && x.d < todayISO()));
+}
+function focusScore(x) {
+  return (x.d === todayISO() ? 1 : 0) + (Number(x.pr) === 1 ? 1 : 0) +
+    (x.d && x.d < todayISO() ? daysOverdue(x.d) : 0);
+}
+function byFocus(a, b) {
+  return focusScore(b) - focusScore(a) || Number(a.pr || 2) - Number(b.pr || 2) ||
+    (a.d || "9999-12-31").localeCompare(b.d || "9999-12-31") || String(a.id).localeCompare(String(b.id), undefined, {numeric: true});
+}
+function selectFocusTasks() {
+  const pool = visTasks().filter(focusEligible);
+  const filtered = projFilter != null || prioFilter != null;
+  if (filtered) return pool.filter(x => !x.isDone).sort(byPrioDate).slice(0, 3);
+  // Keep the existing day's selection, replacing vacant slots from the eligible pool.
+  const slots = [...new Set(snap.focus || [])].slice(0, 3).map(id => pool.find(x => x.id === id));
+  const ids = new Set(slots.filter(Boolean).map(x => x.id));
+  const replacements = pool.filter(x => !x.isDone && !ids.has(x.id)).sort(byFocus);
+  while (slots.length < 3) slots.push(undefined);
+  return slots.map(x => x || replacements.shift()).filter(Boolean);
+}
+
 function renderDash() {
   const g = grouped();
   const doneToday = g.today.filter(x => x.isDone).length + snap.tasks.filter(t => t.doneToday).length;
-  const focusIds = snap.focus || [];
-  const all = visTasks();
   const filtered = projFilter != null || prioFilter != null;
-  // Тройка от бота посчитана по всем задачам: при фильтре пересечение с ней
-  // почти всегда пустое, и главная остаётся вовсе без задач. Под фильтром
-  // считаем фокус заново — топ-3 отфильтрованных по приоритету, затем дате.
-  const focusTasks = filtered
-    ? all.filter(x => !x.isDel).sort(byPrioDate).slice(0, 3)
-    : focusIds.map(id => all.find(x => x.id === id))
-        .filter(Boolean).filter(x => !x.isDel);
+  const focusTasks = selectFocusTasks();
   // при активном фильтре «за неделю ✓» считаем по списку выполненного, а не по общему счётчику
   const doneWeek = !filtered
     ? ((snap.stats && snap.stats.done_week) || 0)
     : doneWeekTasks().length;
-  let html = header("Планировщик");
+  let html = header(esc(CONFIG.title));
   html += projChipsHtml();
   html += prioChipsHtml();
   html += `<div class="stats">
@@ -504,6 +533,10 @@ function renderDash() {
         <div class="fl">${i === 0 ? "Главная задача" : (i === 1 ? "Вторая" : "Третья")}${x.isDone ? " · сделана ✓" : ""}</div>
         <div class="fn">${esc(x.n)}</div>
         <div class="fp">${esc(sub)}</div>
+        <div class="focus-actions">
+          <button type="button" class="focus-action" data-edit="${x.id}" aria-label="Редактировать задачу ${esc(x.n)}">✎ Редактировать</button>
+          <button type="button" class="focus-action" ${x.isNew ? 'data-del-new' : 'data-del'}="${x.id}" aria-label="Удалить задачу ${esc(x.n)}">Удалить</button>
+        </div>
       </div>`;
     });
   } else if (filtered) {
@@ -535,8 +568,12 @@ function renderDash() {
     el.onclick = () => { tab = "list"; scope = el.dataset.scope; render(); window.scrollTo(0, 0); };
   });
   app.querySelectorAll("[data-focus]").forEach(el => {
-    el.onclick = () => toggleDone(el.dataset.focus);
+    el.onclick = event => {
+      if (event.target.closest("button") || String(el.dataset.focus).startsWith("new")) return;
+      toggleDone(el.dataset.focus);
+    };
   });
+  bindTaskHandlers();
   bindProjChips();
   bindPrioChips();
 }
@@ -659,17 +696,18 @@ function bindTaskHandlers() {
     };
   });
   app.querySelectorAll("[data-edit]").forEach(el => {
-    el.onclick = () => renderEditForm(Number(el.dataset.edit));
+    el.onclick = event => { event.stopPropagation(); renderEditForm(el.dataset.edit); };
   });
   app.querySelectorAll("[data-del]").forEach(el => {
-    el.onclick = () => toggleDel(el.dataset.del);
+    el.onclick = event => { event.stopPropagation(); toggleDel(el.dataset.del); };
   });
   app.querySelectorAll("[data-undel]").forEach(el => {
     el.onclick = () => toggleDel(el.dataset.undel);
   });
   // несохранённая задача из буфера удаляется сразу — в БД её ещё нет
   app.querySelectorAll("[data-del-new]").forEach(el => {
-    el.onclick = () => {
+    el.onclick = event => {
+      event.stopPropagation();
       pending.add.splice(Number(String(el.dataset.delNew).slice(3)), 1);
       savePending();
       tg.HapticFeedback.impactOccurred("light");
@@ -864,11 +902,13 @@ function projectOptions(selectedPid) {
 let editDue = null;
 let editPrio = 2;
 function renderEditForm(id) {
-  const orig = snap.tasks.find(t => t.id === id);
+  const newIndex = String(id).startsWith("new") ? Number(String(id).slice(3)) : null;
+  id = newIndex == null ? Number(id) : id;
+  const orig = newIndex == null ? snap.tasks.find(t => t.id === id) : pending.add[newIndex];
   if (!orig) { render(); return; }
   const pendingEdit = pending.edit[id] || {};
   const cur = Object.assign({}, orig, pendingEdit);  // эффективные значения
-  editDue = cur.d || null;
+  editDue = pending.postpone[id] || cur.d || null;
   editPrio = prio(cur);
   tg.BackButton.show();
   mb.hide();
@@ -902,8 +942,13 @@ function renderEditForm(id) {
     if (editPrio !== prio(orig)) changes.pr = editPrio;
     const comment = document.getElementById("ed-comment").value.trim();
     if (comment) changes.cm = comment;
-    if (Object.keys(changes).length) pending.edit[id] = changes;
-    else delete pending.edit[id];
+    if (newIndex != null) {
+      pending.add[newIndex] = { ...orig, n: name, p: newP, d: editDue || null, pr: editPrio };
+    } else {
+      if (Object.keys(changes).length) pending.edit[id] = changes;
+      else delete pending.edit[id];
+      delete pending.postpone[id];
+    }
     savePending();
     tg.HapticFeedback.impactOccurred("light");
     closeSub();
@@ -960,7 +1005,7 @@ mb.onClick(async () => {
   if (snap.stats) snap.stats.done_week = (snap.stats.done_week || 0) + pending.done.length;
   await csSetBig("snap", snap);
   const payload = JSON.stringify({
-    v: 1, done: pending.done, postpone: pending.postpone,
+    v: 1, instance: CONFIG.instance, done: pending.done, postpone: pending.postpone,
     add: pending.add, edit: pending.edit, del: pending.del,
     addProject: pending.addProject
   });
@@ -995,7 +1040,7 @@ async function handleSync() {
   if (!sp) return false;
   try {
     if (sp.whole) {
-      snap = JSON.parse(await gunzipB64(sp.whole));
+      snap = validateSnapshot(JSON.parse(await gunzipB64(sp.whole)));
       await csSetBig("snap", snap);   // кэшируем; даже при отказе CS покажем из памяти
       // открыто из reply-кнопки — данные уже свежие, показываем дашборд сразу
       if (sp.k) {
@@ -1029,7 +1074,7 @@ async function handleSync() {
         `Ещё не получены: ${missing.join(", ")}. Нажмите оставшиеся кнопки синхронизации в чате (порядок не важен).`);
       return true;
     }
-    snap = JSON.parse(await gunzipB64(parts.join("")));
+    snap = validateSnapshot(JSON.parse(await gunzipB64(parts.join(""))));
     if (!(await csSetBig("snap", snap))) {
       renderCenter("Не удалось сохранить", "Куски собраны, но CloudStorage отклонил запись снимка. Запросите новую кнопку: /app");
       return true;
@@ -1052,9 +1097,16 @@ function renderCenter(title, text, withOpen) {
 }
 
 // ── Старт ───────────────────────────────────────────────────────────────────
+function validateSnapshot(data) {
+  if (!data || (data.instance || "v1") !== CONFIG.instance || !Array.isArray(data.tasks)) {
+    throw new Error("Снимок относится к другому боту. Откройте /app в нужном чате.");
+  }
+  return data;
+}
 async function init() {
   if (await handleSync()) return;
-  snap = await csGetBig("snap");
+  try { snap = validateSnapshot(await csGetBig("snap")); }
+  catch (e) { snap = null; }
   if (!snap) {
     renderCenter("Нет данных",
       "Сначала синхронизируйте: отправьте боту команду /app и нажмите кнопку «Синхронизировать».");

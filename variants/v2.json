@@ -1,0 +1,9 @@
+{
+  "instance": "v2",
+  "title": "Планировщик v2",
+  "release": "2026-11-12-focus-2",
+  "runtime": "../releases/v2/2026-11-12-focus-2/app.js",
+  "source": "app.js",
+  "sha256": "8fc19e385bd504a86672ad0d0af893c5f283be05359a9556372de653f679868d",
+  "protocol": 1
+}

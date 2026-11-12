@@ -1,0 +1,1117 @@
+// Shared Mini App runtime. Each bot pins its own immutable release and configuration.
+// Данные: снапшот из CloudStorage (ключ "snap"), обновляется inline-кнопкой
+// «Синхронизировать» от бота (payload в location.hash). Действия копятся в
+// буфер (localStorage) и уходят батчем через sendData из reply-кнопки.
+
+const CONFIG = Object.freeze({ instance: "v1", title: "Планировщик", ...(window.PLANNER_CONFIG || {}) });
+if (!["v1", "v2"].includes(CONFIG.instance)) throw new Error("Unknown planner instance");
+const storageKey = name => `planner_${name}_${CONFIG.instance}`;
+// v1 retains its existing cache; v2 has separate browser and Telegram storage.
+const cloudKey = key => CONFIG.instance === "v1" ? key : `${CONFIG.instance}_${key}`;
+const PENDING_KEY = storageKey("pending");
+
+const STYLE = `
+  :root {
+    --bg: var(--tg-theme-bg-color, #f2f2f7);
+    --card: var(--tg-theme-section-bg-color, #ffffff);
+    --text: var(--tg-theme-text-color, #1c1c1e);
+    --hint: var(--tg-theme-hint-color, #8e8e93);
+    --btn: var(--tg-theme-button-color, #2481cc);
+    --btn-text: var(--tg-theme-button-text-color, #ffffff);
+    --red: #d94f30; --green: #34c759;
+  }
+  * { box-sizing: border-box; margin: 0; -webkit-tap-highlight-color: transparent; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg);
+    color: var(--text); font-size: 16px; line-height: 1.4; padding-bottom: 76px; }
+  .hdr { padding: 16px 16px 8px; }
+  .hdr h1 { font-size: 23px; font-weight: 800; }
+  .hdr .sub { font-size: 13px; color: var(--hint); margin-top: 2px; }
+  .stale { color: #c77b00; }
+  .sec { font-size: 12.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--hint); margin: 14px 16px 7px; display: flex; justify-content: space-between; }
+  .sec .red { color: var(--red); }
+  .card { background: var(--card); border-radius: 13px; margin: 0 12px 8px; padding: 12px 13px; }
+  .task { display: flex; align-items: flex-start; gap: 10px; }
+  .cb { width: 22px; height: 22px; border: 2px solid #c7c7cc; border-radius: 7px; flex-shrink: 0;
+    margin-top: 1px; }
+  .cb.on { background: var(--green); border-color: var(--green); position: relative; }
+  .cb.on::after { content: "✓"; color: #fff; position: absolute; top: -2px; left: 3px;
+    font-size: 15px; font-weight: 800; }
+  .t-body { flex: 1; min-width: 0; }
+  .t-name { font-size: 15px; font-weight: 500; }
+  .t-name.done { text-decoration: line-through; color: var(--hint); }
+  .t-meta { font-size: 12px; color: var(--hint); margin-top: 3px; display: flex; gap: 7px;
+    flex-wrap: wrap; align-items: center; }
+  .chip { font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 5px; }
+  .chip.p1 { background: #ffe5e0; color: var(--red); }
+  .chip.p2 { background: #e9eaee; color: #6b6b70; }
+  .chip.p3 { background: #f0f0f2; color: #9a9aa0; }
+  .chip.proj { background: #e8f0fe; color: #3169c6; }
+  .over { color: var(--red); font-weight: 600; }
+  .moved { color: var(--btn); font-weight: 600; }
+  .moved.del { color: var(--red); }
+  .t-acts { flex-shrink: 0; display: flex; gap: 2px; }
+  .defer { flex-shrink: 0; border: none; background: none; color: var(--hint); font-size: 19px;
+    padding: 2px 4px; cursor: pointer; }
+  .defer-row { display: flex; gap: 6px; margin-top: 8px; }
+  .defer-opt { flex: 1; border: none; border-radius: 9px; background: var(--bg); color: var(--text);
+    font-size: 12.5px; font-weight: 600; padding: 8px 2px; cursor: pointer; }
+  .stats { display: flex; gap: 8px; margin: 4px 12px 6px; }
+  .stat { flex: 1; min-width: 0; background: var(--card); border-radius: 13px; padding: 11px 3px; text-align: center; cursor: pointer; }
+  .stat:active { opacity: .6; }
+  .stat .n { font-size: 22px; font-weight: 800; }
+  .stat .l { font-size: 10.5px; color: var(--hint); margin-top: 1px; }
+  .scope-row { display: flex; gap: 6px; overflow-x: auto; padding: 2px 12px 8px; -webkit-overflow-scrolling: touch; }
+  .scope-row::-webkit-scrollbar { display: none; }
+  .scope-chip { flex: 0 0 auto; background: var(--card); color: var(--hint); border: none;
+    border-radius: 999px; font-size: 12.5px; font-weight: 600; padding: 7px 13px; cursor: pointer; white-space: nowrap; }
+  .scope-chip.on { background: var(--btn); color: #fff; }
+  .n.red { color: var(--red); } .n.blue { color: var(--btn); } .n.green { color: var(--green); }
+  .focus { background: linear-gradient(135deg, var(--btn), #1a5fa8); border-radius: 15px;
+    margin: 0 12px 8px; padding: 13px 15px; color: #fff; }
+  .focus .fl { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em;
+    opacity: .75; margin-bottom: 3px; }
+  .focus .fn { font-size: 15.5px; font-weight: 700; }
+  .focus .fp { font-size: 12px; opacity: .8; margin-top: 4px; }
+  .focus.mini { background: var(--card); color: var(--text); }
+  .focus.mini .fl, .focus.mini .fp { color: var(--hint); opacity: 1; }
+  .focus.done-card { opacity: .55; }
+  .focus-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .focus-action { min-height: 44px; padding: 8px 12px; border: 1px solid currentColor;
+    border-radius: 9px; background: transparent; color: inherit; font: inherit;
+    font-size: 13px; cursor: pointer; }
+  .focus.mini .focus-action { color: var(--btn); }
+  .focus-action:focus-visible { outline: 3px solid currentColor; outline-offset: 2px; }
+  .qa-row { display: flex; gap: 8px; margin: 4px 12px 8px; }
+  .qa { flex: 1; background: var(--card); border: none; border-radius: 12px; padding: 11px 4px;
+    text-align: center; font-size: 12px; font-weight: 600; color: var(--btn); cursor: pointer; }
+  .qa .ic { display: block; font-size: 19px; margin-bottom: 3px; }
+  .ritual { display: flex; align-items: center; gap: 11px; }
+  .rit-st { font-size: 17px; }
+  .tabbar { position: fixed; bottom: 0; left: 0; right: 0; background: var(--card);
+    border-top: .5px solid #d1d1d6; display: flex; padding: 7px 0 20px; z-index: 5; }
+  .tab { flex: 1; text-align: center; font-size: 11px; color: var(--hint); cursor: pointer; }
+  .tab.on { color: var(--btn); }
+  .tab .ic { font-size: 21px; display: block; margin-bottom: 1px; }
+  .empty { text-align: center; color: var(--hint); padding: 40px 30px; font-size: 15px; }
+  .form-label { font-size: 12.5px; font-weight: 700; color: var(--hint); margin: 14px 16px 6px;
+    text-transform: uppercase; letter-spacing: .05em; }
+  input[type=text], input[type=date], select, textarea { width: calc(100% - 24px); margin: 0 12px; padding: 12px 14px;
+    font-size: 16px; font-family: inherit; border: 1.5px solid transparent; border-radius: 12px;
+    background: var(--card); color: var(--text); outline: none; }
+  input[type=text]:focus, input[type=date]:focus, textarea:focus { border-color: var(--btn); }
+  textarea { min-height: 96px; resize: vertical; line-height: 1.4; }
+  .comment-list { margin: 0 12px; background: var(--card); border-radius: 12px; overflow: hidden; }
+  .comment-item { padding: 10px 13px; border-bottom: .5px solid var(--bg); font-size: 14px;
+    white-space: pre-wrap; overflow-wrap: anywhere; }
+  .comment-item:last-child { border-bottom: none; }
+  .comment-time { display: block; color: var(--hint); font-size: 11px; margin-bottom: 3px; }
+  input[type=date] { -webkit-appearance: none; appearance: none; }
+  .date-custom { margin: 7px 12px 0; }
+  .date-custom.on input[type=date] { border-color: var(--btn); }
+  .date-row, .prio-row { display: flex; gap: 7px; margin: 8px 12px 0; }
+  .date-opt, .prio-opt { flex: 1; border: none; border-radius: 10px; background: var(--card); color: var(--text);
+    font-size: 13px; font-weight: 600; padding: 10px 2px; cursor: pointer; }
+  .date-opt.on, .prio-opt.on { background: var(--btn); color: var(--btn-text); }
+  .big-title { font-size: 22px; font-weight: 800; margin: 10px 16px 4px; }
+  .center-box { padding: 60px 28px; text-align: center; }
+  .center-box h2 { font-size: 22px; margin-bottom: 10px; }
+  .center-box p { color: var(--hint); font-size: 15px; }
+  .prim-btn { display: block; width: calc(100% - 32px); margin: 22px 16px 0; border: none;
+    border-radius: 13px; background: var(--btn); color: var(--btn-text); font-size: 16px;
+    font-weight: 700; padding: 14px; cursor: pointer; }
+`;
+const styleEl = document.createElement("style");
+styleEl.textContent = STYLE;
+document.head.appendChild(styleEl);
+
+const tg = window.Telegram.WebApp;
+tg.ready(); tg.expand();
+const app = document.getElementById("app");
+const mb = tg.MainButton;
+const CS = tg.CloudStorage;
+
+function esc(s) {
+  return (s == null ? "" : String(s)).replace(/[&<>"]/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+function csGet(key) {
+  return new Promise(res => { if (!CS) return res(null); CS.getItem(cloudKey(key), (e, v) => res(e ? null : v)); });
+}
+function csSet(key, val) {
+  return new Promise(res => { if (!CS) return res(false); CS.setItem(cloudKey(key), val, (e, ok) => res(!e && ok)); });
+}
+function csRemove(key) {
+  return new Promise(res => { if (!CS) return res(false); CS.removeItem(cloudKey(key), (e, ok) => res(!e && ok)); });
+}
+function b64urlToBytes(s) {
+  s = String(s).replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  return Uint8Array.from(atob(s), c => c.charCodeAt(0));
+}
+async function gunzipB64(b64) {
+  const stream = new Blob([b64urlToBytes(b64)]).stream().pipeThrough(new DecompressionStream("gzip"));
+  return new TextDecoder().decode(await new Response(stream).arrayBuffer());
+}
+async function gzipB64(str) {
+  const cs = new CompressionStream("gzip");
+  const stream = new Blob([new TextEncoder().encode(str)]).stream().pipeThrough(cs);
+  const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+// Снапшот может не влезать в лимит значения CS (~4096) — жмём с префиксом GZ:
+async function csSetBig(key, obj) {
+  let raw = JSON.stringify(obj);
+  if (new TextEncoder().encode(raw).length > 3900) {
+    if (typeof CompressionStream === "undefined") return false;
+    raw = "GZ:" + await gzipB64(raw);
+    if (raw.length > 4096) return false;
+  }
+  return csSet(key, raw);
+}
+async function csGetBig(key) {
+  let raw = await csGet(key);
+  if (!raw) return null;
+  try {
+    if (raw.startsWith("GZ:")) raw = await gunzipB64(raw.slice(3));
+    return JSON.parse(raw);
+  } catch (e) { return null; }
+}
+
+// Приоритетов три: 1 — высокий, 2 — обычный, 3 — низкий. Всё, что вне
+// диапазона (бот может создать 4+), поджимаем к краям.
+const PRIOS = [[1, "Высокий"], [2, "Обычный"], [3, "Низкий"]];
+function prio(x) {
+  const v = Number(x && x.pr);
+  if (!v || v < 1) return 2;
+  return v > 3 ? 3 : v;
+}
+function byPrioDate(a, b) {
+  const p = prio(a) - prio(b);
+  if (p) return p;
+  const da = a.d || "9999-12-31", db = b.d || "9999-12-31";
+  return da < db ? -1 : da > db ? 1 : 0;
+}
+
+// Фильтр по проекту переживает переоткрытие приложения и переключение вкладок.
+const PROJ_KEY = storageKey("projfilter");
+function loadProjFilter() {
+  try {
+    const v = localStorage.getItem(PROJ_KEY);
+    return v == null ? null : JSON.parse(v);
+  } catch (e) { return null; }
+}
+function setProjFilter(v) {
+  projFilter = v;
+  try {
+    if (v == null) localStorage.removeItem(PROJ_KEY);
+    else localStorage.setItem(PROJ_KEY, JSON.stringify(v));
+  } catch (e) {}
+}
+const PRIO_KEY = storageKey("priofilter");
+function loadPrioFilter() {
+  try {
+    const v = localStorage.getItem(PRIO_KEY);
+    return v == null ? null : Number(v);
+  } catch (e) { return null; }
+}
+function setPrioFilter(v) {
+  prioFilter = v;
+  try {
+    if (v == null) localStorage.removeItem(PRIO_KEY);
+    else localStorage.setItem(PRIO_KEY, String(v));
+  } catch (e) {}
+}
+
+// ── Состояние ───────────────────────────────────────────────────────────────
+let snap = null;          // снапшот данных от бота
+let tab = "dash";         // dash | list
+let scope = "today";      // today | tomorrow | week | nextweek | overdue | doneweek
+let pending = loadPending();  // буфер несохранённых действий
+let openDefer = null;     // id задачи с раскрытым выбором переноса
+let projFilter = loadProjFilter();  // фильтр по проекту: null = все, "none" = без проекта, иначе id
+let prioFilter = loadPrioFilter();  // фильтр по приоритету: null = любой, иначе 1|2|3
+
+
+function emptyPending() {
+  return { done: [], postpone: {}, add: [], edit: {}, del: [], addProject: [] };
+}
+function loadPending() {
+  try {
+    const p = JSON.parse(localStorage.getItem(PENDING_KEY) || "null") || {};
+    return Object.assign(emptyPending(), p);   // гарантируем все ключи (миграция старого буфера)
+  } catch (e) { return emptyPending(); }
+}
+function savePending() {
+  try { localStorage.setItem(PENDING_KEY, JSON.stringify(pending)); } catch (e) {}
+  updateMainButton();
+}
+function clearPending() {
+  pending = emptyPending();
+  try { localStorage.removeItem(PENDING_KEY); } catch (e) {}
+  updateMainButton();
+}
+function pendingCount() {
+  return pending.done.length + Object.keys(pending.postpone).length +
+    pending.add.length + Object.keys(pending.edit).length + pending.del.length +
+    pending.addProject.length;
+}
+
+// ── Даты ────────────────────────────────────────────────────────────────────
+// «Сегодня» по локальным часам устройства пользователя, а НЕ по snap.today:
+// снапшот в CloudStorage может устареть (построен вчера) и заморозить дату —
+// тогда кнопка «Сегодня» ставила вчерашний срок. Клиентская дата всегда актуальна.
+function todayISO() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+function isoAddDays(iso, days) {
+  const d = new Date(iso + "T00:00:00");
+  d.setDate(d.getDate() + days);
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+// Понедельник календарной недели, содержащей iso (+ offsetWeeks недель).
+function weekMonday(iso, offsetWeeks) {
+  const d = new Date(iso + "T00:00:00");
+  const dow = (d.getDay() + 6) % 7;   // 0=пн … 6=вс
+  return isoAddDays(iso, -dow + (offsetWeeks || 0) * 7);
+}
+// [понедельник, воскресенье] недели (offsetWeeks: 0=текущая, 1=следующая).
+function weekBounds(iso, offsetWeeks) {
+  const mon = weekMonday(iso, offsetWeeks);
+  return [mon, isoAddDays(mon, 6)];
+}
+const MONTHS_RU = ["янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
+const DOW_RU = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
+function fmtDay(iso) {
+  if (!iso) return "без даты";
+  const d = new Date(iso + "T00:00:00");
+  return `${DOW_RU[d.getDay()]}, ${d.getDate()} ${MONTHS_RU[d.getMonth()]}`;
+}
+function daysOverdue(iso) {
+  const ms = new Date(todayISO() + "T00:00:00") - new Date(iso + "T00:00:00");
+  return Math.round(ms / 86400000);
+}
+
+// ── Производные данные (снапшот + буфер поверх) ─────────────────────────────
+function effTasks() {
+  const done = new Set(pending.done);
+  const del = new Set(pending.del);
+  const out = snap.tasks.map(t => {
+    const e = pending.edit[t.id] || {};
+    return {
+      ...t,
+      n: "n" in e ? e.n : t.n,
+      p: "p" in e ? e.p : t.p,
+      pr: "pr" in e ? e.pr : t.pr,
+      // быстрый перенос (⇥) имеет приоритет над сроком из формы правки
+      d: pending.postpone[t.id] || ("d" in e ? e.d : t.d),
+      isDone: done.has(t.id),
+      isDel: del.has(t.id),
+      isEdited: !!pending.edit[t.id]
+    };
+  });
+  pending.add.forEach((a, i) => out.push({
+    id: "new" + i, n: a.n, p: a.p, pr: a.pr || 2, d: a.d, isDone: false, isNew: true
+  }));
+  return out;
+}
+function grouped() {
+  const t = todayISO();
+  const week = isoAddDays(t, 7);
+  const g = { overdue: [], today: [], upcoming: [] };
+  visTasks().forEach(x => {
+    if (!x.d) return;                    // задачи без даты в списке дня не показываем
+    if (x.d < t) g.overdue.push(x);
+    else if (x.d === t) g.today.push(x);
+    else if (x.d <= week) g.upcoming.push(x);
+  });
+  g.overdue.sort(byPrioDate); g.today.sort(byPrioDate); g.upcoming.sort(byPrioDate);
+  return g;
+}
+function projName(pid) {
+  if (typeof pid === "string" && pid.startsWith("new:")) {
+    const np = pending.addProject[Number(pid.slice(4))];
+    return np ? np.n + " (новый)" : null;
+  }
+  return (snap.projects && snap.projects[pid]) || null;
+}
+
+// Задача проходит текущий фильтр по проекту.
+function matchProj(x) {
+  if (projFilter == null) return true;
+  if (projFilter === "none") return x.p == null;
+  return String(x.p) === String(projFilter);
+}
+// Видимые задачи = буфер поверх снапшота, суженные фильтром проекта.
+function visTasks() {
+  return effTasks().filter(matchProj).filter(x => prioFilter == null || prio(x) === prioFilter);
+}
+// Выполненное за неделю под текущими фильтрами. В снапшотах старых версий
+// у этих задач нет pr — prio() считает их обычными (P2).
+function doneWeekTasks() {
+  return (snap.done_week_tasks || []).filter(matchProj)
+    .filter(x => prioFilter == null || prio(x) === prioFilter);
+}
+// Чипы «Все / <проекты> / Без проекта». Проекты — только те, у которых есть
+// незакрытые задачи (+ выбранный, даже если опустел, иначе из него не выйти).
+function projChipsHtml() {
+  const keys = new Set();
+  effTasks().forEach(x => {
+    if (x.isDone || x.isDel) return;
+    keys.add(x.p == null ? "none" : String(x.p));
+  });
+  if (projFilter != null) keys.add(String(projFilter));
+  if (keys.size < 2) return "";                 // фильтровать нечего
+  const items = [...keys].filter(k => k !== "none")
+    .map(k => [k, projName(k) || "Проект #" + k])
+    .sort((a, b) => a[1].localeCompare(b[1], "ru"));
+  if (keys.has("none")) items.push(["none", "Без проекта"]);
+  const chip = (val, label, on) =>
+    `<button class="scope-chip${on ? " on" : ""}" data-proj="${val}">${esc(label)}</button>`;
+  return `<div class="scope-row">` + chip("", "Все", projFilter == null) +
+    items.map(([k, name]) => chip(k, name, String(projFilter) === k)).join("") + `</div>`;
+}
+// Ряд «Любой / Высокий / Обычный / Низкий» — показываем всегда: значений
+// ровно три, в отличие от плавающего списка проектов.
+function prioChipsHtml() {
+  const chip = (val, label, on) =>
+    `<button class="scope-chip${on ? " on" : ""}" data-prio="${val}">${label}</button>`;
+  return `<div class="scope-row">` + chip("", "Любой", prioFilter == null) +
+    PRIOS.map(([v, label]) => chip(v, label, prioFilter === v)).join("") + `</div>`;
+}
+function bindPrioChips() {
+  app.querySelectorAll("[data-prio]").forEach(el => {
+    el.onclick = () => {
+      const v = el.dataset.prio;
+      setPrioFilter(v === "" ? null : Number(v));
+      openDefer = null;
+      render();
+      window.scrollTo(0, 0);
+    };
+  });
+}
+function bindProjChips() {
+  app.querySelectorAll("[data-proj]").forEach(el => {
+    el.onclick = () => {
+      const v = el.dataset.proj;
+      setProjFilter(v === "" ? null : (v === "none" ? "none" : Number(v)));
+      openDefer = null;
+      render();
+      window.scrollTo(0, 0);
+    };
+  });
+}
+
+// ── Отрисовка ───────────────────────────────────────────────────────────────
+function render() {
+  if (tab === "dash") renderDash();
+  else renderList();
+  renderTabbar();
+  updateMainButton();
+  revealActiveChips();
+}
+// Ряды чипов прокручиваются по горизонтали: выбранный может оказаться за
+// правым краем, и тогда непонятно, какой фильтр включён. Подтягиваем в вид.
+function revealActiveChips() {
+  app.querySelectorAll(".scope-row").forEach(row => {
+    const on = row.querySelector(".scope-chip.on");
+    if (on && on.offsetLeft + on.offsetWidth > row.clientWidth) {
+      row.scrollLeft = Math.max(0, on.offsetLeft - 12);
+    }
+  });
+}
+
+function header(title) {
+  const stale = snap.ts ? staleText(snap.ts) : "";
+  return `<div class="hdr"><h1>${title}</h1>
+    <div class="sub">${esc(fmtDay(todayISO()))}${stale}</div></div>`;
+}
+function staleText(ts) {
+  const ageH = (Date.now() - new Date(ts).getTime()) / 3600000;
+  const t = new Date(ts);
+  const p = n => String(n).padStart(2, "0");
+  const label = `данные: ${p(t.getHours())}:${p(t.getMinutes())}`;
+  return ageH > 18 ? ` · <span class="stale">${label} — запросите синк у бота</span>` : ` · ${label}`;
+}
+
+function taskCard(x, opts) {
+  const withDefer = opts && opts.defer;
+  const meta = [];
+  meta.push(`<span class="chip p${prio(x)}">P${prio(x)}</span>`);
+  const pn = projName(x.p);
+  if (pn) meta.push(`<span class="chip proj">${esc(pn.slice(0, 22))}</span>`);
+  if (x.isNew) meta.push(`<span class="moved">новая</span>`);
+  if (x.isEdited) meta.push(`<span class="moved">изменена</span>`);
+  if (x.isDel) meta.push(`<span class="moved del">удалена</span>`);
+  if (pending.postpone[x.id]) meta.push(`<span class="moved">→ ${esc(fmtDay(x.d))}</span>`);
+  else if (x.d && x.d < todayISO()) meta.push(`<span class="over">${daysOverdue(x.d)} дн.</span>`);
+  else if (x.d && x.d > todayISO()) meta.push(`<span>${esc(fmtDay(x.d))}</span>`);
+  let deferHtml = "";
+  if (openDefer === x.id) {
+    deferHtml = `<div class="defer-row">
+      <button class="defer-opt" data-defer="${x.id}" data-to="${todayISO()}">Сегодня</button>
+      <button class="defer-opt" data-defer="${x.id}" data-to="${isoAddDays(todayISO(), 1)}">Завтра</button>
+      <button class="defer-opt" data-defer="${x.id}" data-to="${isoAddDays(todayISO(), 7)}">+7 дней</button>
+      <button class="defer-opt" data-defer="${x.id}" data-to="">✕</button>
+    </div>`;
+  }
+  return `<div class="card">
+    <div class="task">
+      ${x.isDel ? `<div class="cb"></div>`
+        : x.isNew ? `<div class="cb on" style="background:var(--btn);border-color:var(--btn)"></div>`
+        : `<div class="cb${x.isDone ? " on" : ""}" data-toggle="${x.id}"></div>`}
+      <div class="t-body">
+        <div class="t-name${x.isDone || x.isDel ? " done" : ""}">${esc(x.n)}</div>
+        <div class="t-meta">${meta.join("")}</div>
+      </div>
+      ${x.isDel ? `<div class="t-acts">
+        <button class="defer" data-undel="${x.id}">↩</button>
+      </div>` : x.isNew ? `<div class="t-acts">
+        <button class="defer" data-del-new="${x.id}">🗑</button>
+      </div>` : !x.isDone ? `<div class="t-acts">
+        <button class="defer" data-edit="${x.id}">✎</button>
+        ${withDefer ? `<button class="defer" data-open-defer="${x.id}">⇥</button>` : ""}
+        <button class="defer" data-del="${x.id}">🗑</button>
+      </div>` : ""}
+    </div>${deferHtml}</div>`;
+}
+
+// Same eligibility and score as the bot's compute_focus_today / _score_top3.
+function focusEligible(x) {
+  return !x.isDel && !x.doneToday && (x.d === todayISO() || Number(x.pr) === 1 || (x.d && x.d < todayISO()));
+}
+function focusScore(x) {
+  return (x.d === todayISO() ? 1 : 0) + (Number(x.pr) === 1 ? 1 : 0) +
+    (x.d && x.d < todayISO() ? daysOverdue(x.d) : 0);
+}
+function byFocus(a, b) {
+  return focusScore(b) - focusScore(a) || Number(a.pr || 2) - Number(b.pr || 2) ||
+    (a.d || "9999-12-31").localeCompare(b.d || "9999-12-31") || String(a.id).localeCompare(String(b.id), undefined, {numeric: true});
+}
+function selectFocusTasks() {
+  const pool = visTasks().filter(focusEligible);
+  const filtered = projFilter != null || prioFilter != null;
+  if (filtered) return pool.filter(x => !x.isDone).sort(byPrioDate).slice(0, 3);
+  // Keep the existing day's selection, replacing vacant slots from the eligible pool.
+  const slots = [...new Set(snap.focus || [])].slice(0, 3).map(id => pool.find(x => x.id === id));
+  const ids = new Set(slots.filter(Boolean).map(x => x.id));
+  const replacements = pool.filter(x => !x.isDone && !ids.has(x.id)).sort(byFocus);
+  while (slots.length < 3) slots.push(undefined);
+  return slots.map(x => x || replacements.shift()).filter(Boolean);
+}
+
+function renderDash() {
+  const g = grouped();
+  const doneToday = g.today.filter(x => x.isDone).length + snap.tasks.filter(t => t.doneToday).length;
+  const filtered = projFilter != null || prioFilter != null;
+  const focusTasks = selectFocusTasks();
+  // при активном фильтре «за неделю ✓» считаем по списку выполненного, а не по общему счётчику
+  const doneWeek = !filtered
+    ? ((snap.stats && snap.stats.done_week) || 0)
+    : doneWeekTasks().length;
+  let html = header(esc(CONFIG.title));
+  html += projChipsHtml();
+  html += prioChipsHtml();
+  html += `<div class="stats">
+    <div class="stat" data-scope="today"><div class="n blue">${g.today.filter(x => !x.isDone && !x.isDel).length}</div><div class="l">сегодня</div></div>
+    <div class="stat" data-scope="overdue"><div class="n red">${g.overdue.filter(x => !x.isDone && !x.isDel).length}</div><div class="l">просрочено</div></div>
+    <div class="stat" data-scope="nodate"><div class="n">${visTasks().filter(x => !x.d && !x.isDone && !x.isDel).length}</div><div class="l">без срока</div></div>
+    <div class="stat" data-scope="doneweek"><div class="n green">${doneWeek}</div><div class="l">за неделю ✓</div></div>
+  </div>`;
+  if (focusTasks.length) {
+    html += `<div class="sec"><span>Фокус дня</span></div>`;
+    focusTasks.forEach((x, i) => {
+      const pn = projName(x.p);
+      const sub = [pn, `P${prio(x)}`,
+        x.d && x.d < todayISO() ? `просрочена ${daysOverdue(x.d)} дн.` : null].filter(Boolean).join(" · ");
+      html += `<div class="focus${i ? " mini" : ""}${x.isDone ? " done-card" : ""}" data-focus="${x.id}">
+        <div class="fl">${i === 0 ? "Главная задача" : (i === 1 ? "Вторая" : "Третья")}${x.isDone ? " · сделана ✓" : ""}</div>
+        <div class="fn">${esc(x.n)}</div>
+        <div class="fp">${esc(sub)}</div>
+        <div class="focus-actions">
+          <button type="button" class="focus-action" data-edit="${x.id}" aria-label="Редактировать задачу ${esc(x.n)}">✎ Редактировать</button>
+          <button type="button" class="focus-action" ${x.isNew ? 'data-del-new' : 'data-del'}="${x.id}" aria-label="Удалить задачу ${esc(x.n)}">Удалить</button>
+        </div>
+      </div>`;
+    });
+  } else if (filtered) {
+    html += `<div class="sec"><span>Фокус дня</span></div>
+      <div class="card"><div class="t-body">
+        <div class="t-meta">Нет задач под этим фильтром</div></div></div>`;
+  }
+  html += `<div class="sec"><span>Быстрые действия</span></div>
+    <div class="qa-row">
+      <button class="qa" id="qa-add"><span class="ic">＋</span>Задача</button>
+      <button class="qa" id="qa-add-proj"><span class="ic">📁</span>Проект</button>
+      <button class="qa" id="qa-overdue"><span class="ic">📥</span>Просрочка (${g.overdue.filter(x => !x.isDone && !x.isDel).length})</button>
+    </div>`;
+  const r = snap.rituals || {};
+  html += `<div class="sec"><span>Ритуалы</span></div>
+    <div class="card ritual"><div>🌅</div>
+      <div class="t-body"><div class="t-name">Утренний план</div>
+        <div class="t-meta">${r.morning ? "отправлен ботом" : "ещё не отправлялся"}</div></div>
+      <div class="rit-st">${r.morning ? "✓" : "·"}</div></div>
+    <div class="card ritual"><div>🌙</div>
+      <div class="t-body"><div class="t-name">Вечерний обзор</div>
+        <div class="t-meta">${r.evening ? "отправлен ботом" : "будет в 16:00 UTC"}</div></div>
+      <div class="rit-st">${r.evening ? "✓" : "·"}</div></div>`;
+  app.innerHTML = html;
+  document.getElementById("qa-add").onclick = () => renderAddForm();
+  document.getElementById("qa-add-proj").onclick = () => renderAddProjectForm();
+  document.getElementById("qa-overdue").onclick = () => { tab = "list"; scope = "overdue"; render(); window.scrollTo(0, 0); };
+  app.querySelectorAll(".stat[data-scope]").forEach(el => {
+    el.onclick = () => { tab = "list"; scope = el.dataset.scope; render(); window.scrollTo(0, 0); };
+  });
+  app.querySelectorAll("[data-focus]").forEach(el => {
+    el.onclick = event => {
+      if (event.target.closest("button") || String(el.dataset.focus).startsWith("new")) return;
+      toggleDone(el.dataset.focus);
+    };
+  });
+  bindTaskHandlers();
+  bindProjChips();
+  bindPrioChips();
+}
+
+const SCOPES = [
+  ["today", "Сегодня"], ["tomorrow", "Завтра"],
+  ["week", "Эта неделя"], ["nextweek", "След. неделя"],
+  ["overdue", "Просрочка"], ["nodate", "Без даты"], ["doneweek", "Готово ✓"],
+];
+function scopeTitle() {
+  return ({ today: "Сегодня", tomorrow: "Завтра", week: "Эта неделя",
+    nextweek: "Следующая неделя", overdue: "Просроченные", nodate: "Без срока",
+    doneweek: "Сделано за неделю" })[scope] || "Задачи";
+}
+function scopeChipsHtml() {
+  return `<div class="scope-row">` + SCOPES.map(([s, l]) =>
+    `<button class="scope-chip${scope === s ? " on" : ""}" data-scope="${s}">${l}</button>`).join("") + `</div>`;
+}
+// Активные задачи в диапазоне дат [from, to] включительно, сгруппированные по дню.
+function rangeGroupedHtml(from, to) {
+  // список с заголовками дней: день первым, приоритет — внутри дня
+  const items = visTasks().filter(x => x.d && x.d >= from && x.d <= to && !x.isDone && !x.isDel)
+    .sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : prio(a) - prio(b)));
+  if (!items.length) return `<div class="empty">Задач нет 🎉</div>`;
+  let html = "", curDay = null;
+  items.forEach(x => {
+    if (x.d !== curDay) { curDay = x.d; html += `<div class="sec"><span>${esc(fmtDay(x.d))}</span></div>`; }
+    html += taskCard(x, { defer: true });
+  });
+  return html;
+}
+// Просроченные (срок < сегодня, не выполнены), отсортированные.
+function overdueItems() {
+  const t = todayISO();
+  return visTasks().filter(x => x.d && x.d < t && !x.isDone && !x.isDel).sort(byPrioDate);
+}
+// Секция «Просроченные» с карточками (пусто, если просрочек нет).
+function overdueSectionHtml() {
+  const od = overdueItems();
+  if (!od.length) return "";
+  let h = `<div class="sec"><span class="red">Просроченные</span><span>${od.length}</span></div>`;
+  od.forEach(x => { h += taskCard(x, { defer: true }); });
+  return h;
+}
+function doneCard(t) {
+  const pn = projName(t.p);
+  const meta = [pn ? `<span class="chip proj">${esc(pn.slice(0, 22))}</span>` : "",
+    (t.cd || t.d) ? `<span>${esc(fmtDay(t.cd || t.d))}</span>` : ""].filter(Boolean).join("");
+  return `<div class="card"><div class="task">
+    <div class="cb on" style="background:var(--btn);border-color:var(--btn)"></div>
+    <div class="t-body"><div class="t-name done">${esc(t.n)}</div><div class="t-meta">${meta}</div></div>
+  </div></div>`;
+}
+function renderList() {
+  let html = header(scopeTitle());
+  html += projChipsHtml();
+  html += prioChipsHtml();
+  html += scopeChipsHtml();
+  if (scope === "today") {
+    const g = grouped();
+    if (g.overdue.length) {
+      html += `<div class="sec"><span class="red">Просроченные</span><span>${g.overdue.length}</span></div>`;
+      g.overdue.forEach(x => { html += taskCard(x, { defer: true }); });
+    }
+    html += `<div class="sec"><span>Сегодня</span><span>${g.today.length}</span></div>`;
+    if (g.today.length) g.today.forEach(x => { html += taskCard(x, { defer: true }); });
+    else html += `<div class="empty">На сегодня задач нет 🎉</div>`;
+    if (g.upcoming.length) {
+      html += `<div class="sec"><span>Ближайшие 7 дней</span><span>${g.upcoming.length}</span></div>`;
+      g.upcoming.forEach(x => { html += taskCard(x, {}); });
+    }
+  } else if (scope === "tomorrow") {
+    const tm = isoAddDays(todayISO(), 1);
+    html += rangeGroupedHtml(tm, tm);
+  } else if (scope === "week") {
+    // Текущая неделя: сверху все просроченные, затем задачи с сегодня до вс.
+    const t = todayISO();
+    const [, sun] = weekBounds(t, 0);
+    const od = overdueSectionHtml();
+    html += od;
+    const hasRange = visTasks().some(x => x.d && x.d >= t && x.d <= sun && !x.isDone && !x.isDel);
+    if (hasRange) html += rangeGroupedHtml(t, sun);
+    else if (!od) html += `<div class="empty">На этой неделе задач нет 🎉</div>`;
+  } else if (scope === "nextweek") {
+    const [mon, sun] = weekBounds(todayISO(), 1);
+    html += rangeGroupedHtml(mon, sun);
+  } else if (scope === "overdue") {
+    const od = overdueItems();
+    if (!od.length) html += `<div class="empty">Просроченных нет 🎉</div>`;
+    else od.forEach(x => { html += taskCard(x, { defer: true }); });
+  } else if (scope === "nodate") {
+    // задачи без срока — их не видно ни в одном дневном списке
+    const items = visTasks().filter(x => !x.d && !x.isDone && !x.isDel).sort(byPrioDate);
+    if (!items.length) html += `<div class="empty">Задач без срока нет</div>`;
+    else items.forEach(x => { html += taskCard(x, { defer: true }); });
+  } else if (scope === "doneweek") {
+    const done = doneWeekTasks()
+      .sort((a, b) => ((a.cd || a.d || "") < (b.cd || b.d || "") ? 1 : -1));
+    if (!done.length) html += `<div class="empty">За неделю ничего не выполнено</div>`;
+    else done.forEach(t => { html += doneCard(t); });
+  }
+  app.innerHTML = html;
+  app.querySelectorAll(".scope-chip[data-scope]").forEach(el => {
+    el.onclick = () => { scope = el.dataset.scope; openDefer = null; render(); window.scrollTo(0, 0); };
+  });
+  bindProjChips();
+  bindPrioChips();
+  bindTaskHandlers();
+}
+
+function bindTaskHandlers() {
+  app.querySelectorAll("[data-toggle]").forEach(el => {
+    el.onclick = () => toggleDone(el.dataset.toggle);
+  });
+  app.querySelectorAll("[data-open-defer]").forEach(el => {
+    el.onclick = () => {
+      const id = Number(el.dataset.openDefer);
+      openDefer = openDefer === id ? null : id;
+      render();
+    };
+  });
+  app.querySelectorAll("[data-edit]").forEach(el => {
+    el.onclick = event => { event.stopPropagation(); renderEditForm(el.dataset.edit); };
+  });
+  app.querySelectorAll("[data-del]").forEach(el => {
+    el.onclick = event => { event.stopPropagation(); toggleDel(el.dataset.del); };
+  });
+  app.querySelectorAll("[data-undel]").forEach(el => {
+    el.onclick = () => toggleDel(el.dataset.undel);
+  });
+  // несохранённая задача из буфера удаляется сразу — в БД её ещё нет
+  app.querySelectorAll("[data-del-new]").forEach(el => {
+    el.onclick = event => {
+      event.stopPropagation();
+      pending.add.splice(Number(String(el.dataset.delNew).slice(3)), 1);
+      savePending();
+      tg.HapticFeedback.impactOccurred("light");
+      render();
+    };
+  });
+  app.querySelectorAll("[data-defer]").forEach(el => {
+    el.onclick = () => {
+      const id = Number(el.dataset.defer);
+      const to = el.dataset.to;
+      if (to) pending.postpone[id] = to;
+      else delete pending.postpone[id];
+      openDefer = null;
+      savePending();
+      tg.HapticFeedback.impactOccurred("light");
+      render();
+    };
+  });
+}
+
+// Удаление = архивирование на стороне бота. До «Сохранить» обратимо кнопкой ↩.
+function toggleDel(id) {
+  id = Number(id);
+  const i = pending.del.indexOf(id);
+  if (i >= 0) {
+    pending.del.splice(i, 1);
+  } else {
+    pending.del.push(id);
+    const j = pending.done.indexOf(id);   // удалённая не может быть ещё и «сделана»
+    if (j >= 0) pending.done.splice(j, 1);
+  }
+  savePending();
+  tg.HapticFeedback.impactOccurred("medium");
+  render();
+}
+
+function toggleDone(id) {
+  id = Number(id);
+  const i = pending.done.indexOf(id);
+  if (i >= 0) pending.done.splice(i, 1);
+  else pending.done.push(id);
+  savePending();
+  tg.HapticFeedback.impactOccurred("light");
+  render();
+}
+
+// ── Секция выбора срока (пресеты + произвольная дата) ─────────────────────────
+function datePresets() {
+  return [["Сегодня", todayISO()], ["Завтра", isoAddDays(todayISO(), 1)],
+    ["+7 дней", isoAddDays(todayISO(), 7)], ["Без даты", ""]];
+}
+function dateSectionHtml(sel) {
+  const presets = datePresets();
+  const isPreset = presets.some(([, v]) => (v || null) === sel);
+  return `<div class="date-row">
+      ${presets.map(([lbl, v]) =>
+        `<button class="date-opt${(v || null) === sel && isPreset ? " on" : ""}" data-due="${v}">${lbl}</button>`).join("")}
+    </div>
+    <div class="date-custom${sel && !isPreset ? " on" : ""}">
+      <input type="date" id="date-custom" value="${sel && !isPreset ? sel : ""}" placeholder="Другая дата">
+    </div>`;
+}
+// Секция выбора приоритета; setPrio(1|2|3) вызывается при клике.
+function prioSectionHtml(sel) {
+  return `<div class="prio-row">` + PRIOS.map(([v, label]) =>
+    `<button class="prio-opt${v === sel ? " on" : ""}" data-prio-opt="${v}">${label}</button>`).join("") + `</div>`;
+}
+function wirePrioSection(setPrio) {
+  app.querySelectorAll(".prio-opt").forEach(b => {
+    b.onclick = () => {
+      setPrio(Number(b.dataset.prioOpt));
+      app.querySelectorAll(".prio-opt").forEach(x => x.classList.toggle("on", x === b));
+    };
+  });
+}
+
+// setDue(iso|null) вызывается при выборе пресета или произвольной даты
+function wireDateSection(setDue) {
+  const custom = app.querySelector("#date-custom");
+  const box = app.querySelector(".date-custom");
+  app.querySelectorAll(".date-opt").forEach(b => {
+    b.onclick = () => {
+      setDue(b.dataset.due || null);
+      app.querySelectorAll(".date-opt").forEach(x => x.classList.toggle("on", x === b));
+      if (custom) custom.value = "";
+      if (box) box.classList.remove("on");
+    };
+  });
+  if (custom) custom.onchange = () => {
+    if (!custom.value) return;
+    setDue(custom.value);
+    app.querySelectorAll(".date-opt").forEach(x => x.classList.remove("on"));
+    if (box) box.classList.add("on");
+  };
+}
+
+// ── Добавление задачи ───────────────────────────────────────────────────────
+let addDue = null;
+let addPrio = 2;
+function renderAddForm() {
+  addDue = todayISO();
+  addPrio = 2;
+  tg.BackButton.show();
+  app.innerHTML = `<div class="big-title">Новая задача</div>
+    <div class="form-label">Название</div>
+    <input type="text" id="add-name" placeholder="Что нужно сделать?">
+    <div class="form-label">Проект</div>
+    <select id="add-proj">${projectOptions(null)}</select>
+    <div class="form-label">Приоритет</div>
+    ${prioSectionHtml(addPrio)}
+    <div class="form-label">Срок</div>
+    ${dateSectionHtml(addDue)}
+    <button class="prim-btn" id="add-go">Добавить в буфер</button>`;
+  mb.hide();
+  wireDateSection(v => { addDue = v; });
+  wirePrioSection(v => { addPrio = v; });
+  document.getElementById("add-go").onclick = () => {
+    const name = document.getElementById("add-name").value.trim();
+    if (!name) { tg.HapticFeedback.notificationOccurred("error"); return; }
+    const pid = parseProjVal(document.getElementById("add-proj").value);
+    pending.add.push({ n: name, p: pid, d: addDue, pr: addPrio });
+    savePending();
+    tg.HapticFeedback.impactOccurred("light");
+    closeSub();
+  };
+  tg.BackButton.onClick(closeSub);
+}
+function closeSub() {
+  tg.BackButton.hide();
+  render();
+}
+
+// ── Добавление проекта ──────────────────────────────────────────────────────
+function renderAddProjectForm() {
+  tg.BackButton.show();
+  mb.hide();
+  const existing = pending.addProject.length
+    ? `<div class="sec"><span>Новые проекты в буфере</span></div>` +
+      pending.addProject.map((np, i) =>
+        `<div class="card"><div class="task"><div class="t-body">
+          <div class="t-name">📁 ${esc(np.n)}</div><div class="t-meta">будет создан при сохранении</div>
+        </div><div class="t-acts"><button class="defer" data-del-proj="${i}">✕</button></div></div></div>`).join("")
+    : "";
+  app.innerHTML = `<div class="big-title">Новый проект</div>
+    <div class="form-label">Название проекта</div>
+    <input type="text" id="proj-name" placeholder="Например: Ремонт квартиры">
+    <button class="prim-btn" id="proj-go">Добавить в буфер</button>
+    ${existing}`;
+  const input = document.getElementById("proj-name");
+  input.focus();
+  document.getElementById("proj-go").onclick = () => {
+    const name = input.value.trim();
+    if (!name) { tg.HapticFeedback.notificationOccurred("error"); return; }
+    pending.addProject.push({ n: name });
+    savePending();
+    tg.HapticFeedback.impactOccurred("light");
+    renderAddProjectForm();   // остаёмся в форме — видно буфер, можно добавить ещё
+  };
+  app.querySelectorAll("[data-del-proj]").forEach(el => {
+    el.onclick = () => {
+      pending.addProject.splice(Number(el.dataset.delProj), 1);
+      savePending();
+      renderAddProjectForm();
+    };
+  });
+  tg.BackButton.onClick(closeSub);
+}
+
+// Значение <select> проектов → p для буфера: "" → null, "new:i" → строка, иначе число.
+function parseProjVal(v) {
+  if (!v) return null;
+  return v.startsWith("new:") ? v : Number(v);
+}
+// Опции <select> проектов; текущий проект задачи добавляется, даже если он
+// не «In Progress» (в снапшоте таких нет) — иначе правка случайно его сбросит.
+function projectOptions(selectedPid) {
+  const projs = Object.entries(snap.projects || {});
+  const has = selectedPid != null && projs.some(([id]) => Number(id) === selectedPid);
+  let out = `<option value=""${selectedPid == null ? " selected" : ""}>Без проекта</option>`;
+  if (selectedPid != null && !has) {
+    out += `<option value="${selectedPid}" selected>${esc(projName(selectedPid) || "Проект #" + selectedPid)}</option>`;
+  }
+  out += projs.map(([id, name]) =>
+    `<option value="${id}"${Number(id) === selectedPid ? " selected" : ""}>${esc(name)}</option>`).join("");
+  // Несохранённые проекты из буфера — можно сразу назначить задаче (id вида "new:i")
+  out += pending.addProject.map((np, i) =>
+    `<option value="new:${i}"${selectedPid === "new:" + i ? " selected" : ""}>${esc(np.n)} (новый)</option>`).join("");
+  return out;
+}
+
+// ── Редактирование задачи ─────────────────────────────────────────────────────
+let editDue = null;
+let editPrio = 2;
+function renderEditForm(id) {
+  const newIndex = String(id).startsWith("new") ? Number(String(id).slice(3)) : null;
+  id = newIndex == null ? Number(id) : id;
+  const orig = newIndex == null ? snap.tasks.find(t => t.id === id) : pending.add[newIndex];
+  if (!orig) { render(); return; }
+  const pendingEdit = pending.edit[id] || {};
+  const cur = Object.assign({}, orig, pendingEdit);  // эффективные значения
+  editDue = pending.postpone[id] || cur.d || null;
+  editPrio = prio(cur);
+  tg.BackButton.show();
+  mb.hide();
+  app.innerHTML = `<div class="big-title">Редактировать задачу</div>
+    <div class="form-label">Название</div>
+    <input type="text" id="ed-name" value="${esc(cur.n)}">
+    <div class="form-label">Проект</div>
+    <select id="ed-proj">${projectOptions(
+      typeof cur.p === "string" && cur.p.startsWith("new:") ? cur.p
+        : (cur.p == null ? null : Number(cur.p)))}</select>
+    <div class="form-label">Приоритет</div>
+    ${prioSectionHtml(editPrio)}
+    <div class="form-label">Срок</div>
+    ${dateSectionHtml(editDue)}
+    ${(orig.c || []).length ? `<div class="form-label">Комментарии (${orig.cc || orig.c.length})</div>
+      <div class="comment-list">${orig.c.map(c => `<div class="comment-item">
+        <span class="comment-time">${esc(c.at || "")}</span>${esc(c.x)}</div>`).join("")}</div>` : ""}
+    <div class="form-label">Новый комментарий</div>
+    <textarea id="ed-comment" placeholder="Напишите комментарий к задаче">${esc(pendingEdit.cm || "")}</textarea>
+    <button class="prim-btn" id="ed-go">Сохранить в буфер</button>`;
+  wireDateSection(v => { editDue = v; });
+  wirePrioSection(v => { editPrio = v; });
+  document.getElementById("ed-go").onclick = () => {
+    const name = document.getElementById("ed-name").value.trim();
+    if (!name) { tg.HapticFeedback.notificationOccurred("error"); return; }
+    const newP = parseProjVal(document.getElementById("ed-proj").value);
+    const changes = {};
+    if (name !== orig.n) changes.n = name;
+    if (newP !== (orig.p == null ? null : Number(orig.p))) changes.p = newP;
+    if ((editDue || null) !== (orig.d || null)) changes.d = editDue || null;
+    if (editPrio !== prio(orig)) changes.pr = editPrio;
+    const comment = document.getElementById("ed-comment").value.trim();
+    if (comment) changes.cm = comment;
+    if (newIndex != null) {
+      pending.add[newIndex] = { ...orig, n: name, p: newP, d: editDue || null, pr: editPrio };
+    } else {
+      if (Object.keys(changes).length) pending.edit[id] = changes;
+      else delete pending.edit[id];
+      delete pending.postpone[id];
+    }
+    savePending();
+    tg.HapticFeedback.impactOccurred("light");
+    closeSub();
+  };
+  tg.BackButton.onClick(closeSub);
+}
+
+function renderTabbar() {
+  let bar = document.getElementById("tabbar");
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.id = "tabbar";
+    bar.className = "tabbar";
+    document.body.appendChild(bar);
+  }
+  bar.innerHTML = `
+    <div class="tab${tab === "dash" ? " on" : ""}" data-tab="dash"><span class="ic">🏠</span>Дашборд</div>
+    <div class="tab${tab === "list" ? " on" : ""}" data-tab="list"><span class="ic">📋</span>Задачи</div>`;
+  bar.querySelectorAll(".tab").forEach(el => {
+    el.onclick = () => { tab = el.dataset.tab; openDefer = null; render(); window.scrollTo(0, 0); };
+  });
+}
+
+// ── Сохранение батча ────────────────────────────────────────────────────────
+function updateMainButton() {
+  const n = pendingCount();
+  if (!n || !snap) { mb.hide(); return; }
+  mb.setText(`Сохранить изменения (${n})`);
+  mb.show(); mb.enable();
+}
+mb.onClick(async () => {
+  if (!pendingCount()) return;
+  // оптимистично применяем буфер к локальному снапшоту — чтобы после
+  // переоткрытия приложение показывало актуальное без синка
+  const doneSet = new Set(pending.done);
+  const delSet = new Set(pending.del);
+  snap.tasks = snap.tasks.filter(t => !doneSet.has(t.id) && !delSet.has(t.id));
+  snap.tasks.forEach(t => {
+    const e = pending.edit[t.id];
+    if (e) {
+      if ("n" in e) t.n = e.n;
+      if ("p" in e) t.p = e.p;
+      if ("d" in e) t.d = e.d;
+      if ("pr" in e) t.pr = e.pr;
+      if (e.cm) {
+        t.c = (t.c || []).concat([{ x: e.cm, at: new Date().toISOString().slice(0, 16) }]).slice(-10);
+        t.cc = (t.cc || 0) + 1;
+      }
+    }
+    if (pending.postpone[t.id]) t.d = pending.postpone[t.id];
+    // временные проекты ("new:i") реальный id получат после синка от бота
+    if (typeof t.p === "string" && t.p.startsWith("new:")) t.p = null;
+  });
+  if (snap.stats) snap.stats.done_week = (snap.stats.done_week || 0) + pending.done.length;
+  await csSetBig("snap", snap);
+  const payload = JSON.stringify({
+    v: 1, instance: CONFIG.instance, done: pending.done, postpone: pending.postpone,
+    add: pending.add, edit: pending.edit, del: pending.del,
+    addProject: pending.addProject
+  });
+  clearPending();
+  tg.HapticFeedback.notificationOccurred("success");
+  tg.sendData(payload);   // закроет приложение; бот применит и пришлёт свежий синк
+});
+
+// ── Синк-режим (данные от бота в URL) ───────────────────────────────────────
+// ?sync=<b64url gzip json>  или фрагменты  ?syncf=<t>:<i>:<n>:<кусок>
+// (query-параметры, не hash — проверенный в Telegram путь; hash поддержан для совместимости)
+function syncParams() {
+  const qs = new URLSearchParams(window.location.search);
+  // k=1 — открыто из reply-кнопки «Планировщик» (sendData работает) → сразу дашборд
+  if (qs.get("sync")) return { whole: qs.get("sync"), k: qs.get("k") === "1" };
+  if (qs.get("syncf")) {
+    const m = qs.get("syncf").match(/^([^:]+):(\d+):(\d+):(.+)$/);
+    if (m) return { t: m[1], i: Number(m[2]), n: Number(m[3]), chunk: m[4] };
+  }
+  const h = window.location.hash || "";
+  const m1 = h.match(/#sync=(.+)/);
+  if (m1) return { whole: m1[1] };
+  const m2 = h.match(/#syncf=([^:]+):(\d+):(\d+):(.+)/);
+  if (m2) return { t: m2[1], i: Number(m2[2]), n: Number(m2[3]), chunk: m2[4] };
+  return null;
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function handleSync() {
+  const sp = syncParams();
+  if (!sp) return false;
+  try {
+    if (sp.whole) {
+      snap = validateSnapshot(JSON.parse(await gunzipB64(sp.whole)));
+      await csSetBig("snap", snap);   // кэшируем; даже при отказе CS покажем из памяти
+      // открыто из reply-кнопки — данные уже свежие, показываем дашборд сразу
+      if (sp.k) {
+        history.replaceState(null, "", location.pathname);
+        render();
+        return true;
+      }
+      renderCenter("Данные обновлены ✓",
+        "Снимок задач синхронизирован. Откройте планировщик кнопкой «📱 Планировщик» на клавиатуре бота.", true);
+      return true;
+    }
+    const { t, i, n, chunk } = sp;
+    const wrote = await csSet("sf" + t + "_" + i, chunk);
+    if (!wrote) {
+      renderCenter("Не удалось сохранить кусок", `CloudStorage отклонил запись (кусок ${i + 1}/${n}). Запросите новую кнопку: /app`);
+      return true;
+    }
+    // CloudStorage серверный — записи из других webview могут доезжать с лагом; ретраим чтение
+    let parts = null, missing = [];
+    for (let attempt = 0; attempt < 4; attempt++) {
+      parts = []; missing = [];
+      for (let k = 0; k < n; k++) {
+        const p = await csGet("sf" + t + "_" + k);
+        if (p) parts.push(p); else missing.push(k + 1);
+      }
+      if (!missing.length) break;
+      await sleep(600);
+    }
+    if (missing.length) {
+      renderCenter(`Кусок ${i + 1} из ${n} получен`,
+        `Ещё не получены: ${missing.join(", ")}. Нажмите оставшиеся кнопки синхронизации в чате (порядок не важен).`);
+      return true;
+    }
+    snap = validateSnapshot(JSON.parse(await gunzipB64(parts.join(""))));
+    if (!(await csSetBig("snap", snap))) {
+      renderCenter("Не удалось сохранить", "Куски собраны, но CloudStorage отклонил запись снимка. Запросите новую кнопку: /app");
+      return true;
+    }
+    for (let k = 0; k < n; k++) await csRemove("sf" + t + "_" + k);
+    renderCenter("Данные обновлены ✓",
+      "Снимок задач синхронизирован. Откройте планировщик кнопкой «📱 Планировщик» на клавиатуре бота.", true);
+  } catch (e) {
+    renderCenter("Не удалось синхронизировать",
+      `Ошибка: ${esc(String(e && e.message || e)).slice(0, 120)}. Запросите новую кнопку у бота: /app`);
+  }
+  return true;
+}
+function renderCenter(title, text, withOpen) {
+  mb.hide(); tg.BackButton.hide();
+  app.innerHTML = `<div class="center-box"><h2>${title}</h2><p>${text}</p>
+    ${withOpen ? `<button class="prim-btn" id="c-open">Показать сейчас</button>` : ""}</div>`;
+  const b = document.getElementById("c-open");
+  if (b) b.onclick = () => { history.replaceState(null, "", location.pathname); render(); };
+}
+
+// ── Старт ───────────────────────────────────────────────────────────────────
+function validateSnapshot(data) {
+  if (!data || (data.instance || "v1") !== CONFIG.instance || !Array.isArray(data.tasks)) {
+    throw new Error("Снимок относится к другому боту. Откройте /app в нужном чате.");
+  }
+  return data;
+}
+async function init() {
+  if (await handleSync()) return;
+  try { snap = validateSnapshot(await csGetBig("snap")); }
+  catch (e) { snap = null; }
+  if (!snap) {
+    renderCenter("Нет данных",
+      "Сначала синхронизируйте: отправьте боту команду /app и нажмите кнопку «Синхронизировать».");
+    return;
+  }
+  render();
+}
+init();
